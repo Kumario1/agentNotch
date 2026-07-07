@@ -24,12 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController!
     private var engine: UsageEngine!
     private var limits: LimitsEngine!
+    private var sessions: SessionEngine!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         controller = NotchController()
+        let config = AppConfig.load()
         engine = UsageEngine(store: controller.store)   // still feeds last-project footer
         engine.start()
-        limits = LimitsEngine(config: AppConfig.load()) { [weak self] accounts in
+        sessions = SessionEngine(config: config, store: controller.store)
+        sessions.start()
+        limits = LimitsEngine(config: config) { [weak self] accounts in
             guard let self else { return }
             self.controller.store.accounts = accounts
             self.controller.setAccountCount(accounts.count)

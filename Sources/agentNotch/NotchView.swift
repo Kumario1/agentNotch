@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // Sizes computed by NotchController from the physical notch.
@@ -9,7 +10,10 @@ struct NotchMetrics: Equatable {
 
 // UI-only state; separate from usage data so hover doesn't touch the store.
 import Observation
-@Observable final class NotchState { var expanded = false }
+@Observable final class NotchState {
+    var expanded = false
+    var selectedSessionID: String? = nil
+}
 
 // The Apple-notch silhouette: concave flares at the top outer corners (wallpaper
 // peeks over them, like the real notch meeting the bezel) + convex rounded bottom.
@@ -111,7 +115,7 @@ struct NotchRootView: View {
             // Content zooms with the shape as one unit (Dynamic Island style):
             // outgoing content scales toward the incoming state, incoming scales into place.
             if exp {
-                ExpandedContent(store: store)
+                ExpandedContent(store: store, ui: ui)
                     .transition(.scale(scale: 0.9, anchor: .top).combined(with: .opacity))
             } else {
                 CollapsedContent(store: store, notchWidth: m.notchWidth)
@@ -177,13 +181,6 @@ private struct CodexTile: View {
     }
 }
 
-private func productName(_ p: Product) -> String {
-    switch p {
-    case .claude: "Claude Code"
-    case .codex: "Codex"
-    }
-}
-
 @ViewBuilder private func productTile(_ p: Product, size: CGFloat) -> some View {
     switch p {
     case .claude: ClaudeTile(size: size)
@@ -210,7 +207,7 @@ private struct RingGauge: View {
                 .stroke(usageColor(fraction, product), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .padding(lineWidth / 2)
-            Text("\(Int(fraction * 100))")
+            Text(verbatim: "\(Int(fraction * 100))")
                 .font(.system(size: size * 0.36, weight: .medium))
                 .monospacedDigit()
                 .contentTransition(.numericText())
@@ -248,36 +245,52 @@ private struct CollapsedContent: View {
     }
 }
 
-// MARK: - Expanded layout: one card per account
+// MARK: - Expanded layout: live sessions
 
 private struct ExpandedContent: View {
     var store: UsageStore
+    var ui: NotchState
 
     var body: some View {
-        let s = store.snapshot
-        VStack(alignment: .leading, spacing: 10) {
-            Text("USAGE REMAINING")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(2)
-                .foregroundStyle(.white.opacity(0.45))
-            if store.accounts.isEmpty {
-                Text("waiting for account data...")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-            ForEach(store.accounts) { AccountRow(account: $0) }
+        let sessions = store.sessions
+        let selected = sessions.first { $0.id == ui.selectedSessionID }
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(s.lastProject ?? "no activity yet")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(peach.opacity(0.9))
-                    .lineLimit(1).truncationMode(.middle)
+                Text("LIVE SESSIONS")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(2)
+                    .foregroundStyle(.white.opacity(0.45))
                 Spacer()
-                if let a = s.lastActivity {
-                    Text(a, style: .relative)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
+                Text(verbatim: "\(sessions.count)")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(peach.opacity(0.9))
+            }
+            .padding(.bottom, 8)
+
+            ZStack(alignment: .top) {
+                if let selected {
+                    SessionControl(session: selected) {
+                        withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = nil }
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                } else if sessions.isEmpty {
+                    EmptySessions()
+                        .transition(.opacity)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(sessions) { session in
+                                SessionRow(session: session) {
+                                    withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = session.id }
+                                }
+                                Divider().overlay(.white.opacity(0.08))
+                            }
+                        }
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                 }
             }
+            .animation(.smooth(duration: 0.32), value: ui.selectedSessionID)
         }
         .padding(.horizontal, 24)
         .padding(.top, 40) // clear the physical notch / camera area
@@ -286,79 +299,200 @@ private struct ExpandedContent: View {
     }
 }
 
-private struct AccountRow: View {
-    let account: AccountUsage
+private struct EmptySessions: View {
+    var body: some View {
+        VStack(spacing: 6) {
+            Text("no real sessions")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            Text("start Claude Code or Codex and live rows appear here")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+        .frame(maxWidth: .infinity, minHeight: 210)
+    }
+}
+
+private struct SessionRow: View {
+    let session: AgentSession
+    let select: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                productTile(account.product, size: 26)
-                Text("\(account.label) - \(productName(account.product))")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer()
-                if let asOf = account.asOf, Date().timeIntervalSince(asOf) > 300 {
-                    (Text("as of ") + Text(asOf, style: .relative) + Text(" ago"))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
+        Button(action: select) {
+            HStack(spacing: 14) {
+                SessionTile(session: session)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text(verbatim: session.title)
+                            .font(.system(size: 19, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(verbatim: session.detail)
+                            .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color(red: 0.55, green: 0.63, blue: 1.0))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    HStack(spacing: 8) {
+                        Text(verbatim: "↑\(compactCount(session.inputTokens))")
+                        Text(verbatim: "↓\(compactCount(session.outputTokens))")
+                    }
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.42))
+                }
+                Spacer(minLength: 10)
+                TimelineView(.periodic(from: .now, by: 15)) { _ in
+                    Text(verbatim: shortAge(session.lastActivity))
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .frame(width: 48, alignment: .trailing)
                 }
             }
-            if let status = account.status {
-                Text(status)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(dangerRed.opacity(0.9))
-            } else {
-                ForEach(account.windows, id: \.name) { w in
-                    WindowBarRow(window: w, product: account.product)
+            .padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SessionControl: View {
+    let session: AgentSession
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Capsule()
+                .fill(.white.opacity(0.22))
+                .frame(width: 3, height: 28)
+                .frame(maxWidth: .infinity)
+            HStack(spacing: 12) {
+                SessionTile(session: session, size: 46)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: session.title)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(verbatim: session.detail)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(red: 0.55, green: 0.63, blue: 1.0))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.72))
+            }
+
+            HStack(spacing: 10) {
+                MetricPill(label: "IN", value: compactCount(session.inputTokens))
+                MetricPill(label: "OUT", value: compactCount(session.outputTokens))
+                TimelineView(.periodic(from: .now, by: 15)) { _ in
+                    MetricPill(label: "AGE", value: shortAge(session.lastActivity))
+                }
+            }
+
+            HStack(spacing: 8) {
+                ControlButton(icon: "folder", title: "Open") {
+                    if let cwd = session.cwd {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: cwd, isDirectory: true))
+                    } else {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.transcriptPath)])
+                    }
+                }
+                ControlButton(icon: "doc.text.magnifyingglass", title: "Transcript") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.transcriptPath)])
+                }
+                ControlButton(icon: "doc.on.doc", title: "Copy ID") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(session.sessionID ?? session.id, forType: .string)
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.white.opacity(0.07))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.white.opacity(0.08))
         )
     }
 }
 
-private struct WindowBarRow: View {
-    let window: LimitWindow
-    let product: Product
+private struct SessionTile: View {
+    let session: AgentSession
+    var size: CGFloat = 60
 
     var body: some View {
-        let f = min(max(window.percent / 100, 0), 1)
-        HStack(spacing: 10) {
-            Text(window.name)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
-                .frame(width: 36, alignment: .leading)
-            Capsule().fill(.white.opacity(0.15))
-                .overlay(alignment: .leading) {
-                    GeometryReader { g in
-                        Capsule().fill(usageColor(f, product))
-                            .frame(width: max(g.size.width * f, f > 0 ? 6 : 0))
-                    }
-                }
-                .frame(height: 6)
-            Text("\(Int(window.percent.rounded()))%")
-                .font(.system(size: 13, weight: .bold))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .foregroundStyle(.white)
-                .frame(width: 40, alignment: .trailing)
-            if let r = window.resetsAt, r > .now {
-                Text(timerInterval: Date.now...r, countsDown: true)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(width: 62, alignment: .trailing)
-            } else {
-                Text("—")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .frame(width: 62, alignment: .trailing)
-            }
-        }
+        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+            .fill(tileColor)
+            .overlay(
+                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
+            )
+            .overlay(
+                Text(verbatim: String(session.title.prefix(1)).uppercased())
+                    .font(.system(size: size * 0.38, weight: .heavy))
+                    .foregroundStyle(.white)
+            )
+            .frame(width: size, height: size)
     }
+
+    private var tileColor: LinearGradient {
+        let colors: [Color] = session.product == .claude
+            ? [Color(red: 0.84, green: 0.30, blue: 0.56), Color(red: 0.56, green: 0.24, blue: 0.74)]
+            : [Color(red: 0.45, green: 0.50, blue: 0.58), Color(red: 0.30, green: 0.34, blue: 0.40)]
+        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+}
+
+private struct MetricPill: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(verbatim: label).foregroundStyle(.white.opacity(0.42))
+            Text(verbatim: value).foregroundStyle(.white.opacity(0.82))
+        }
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(.white.opacity(0.08)))
+    }
+}
+
+private struct ControlButton: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.82))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.09)))
+    }
+}
+
+private func compactCount(_ n: Int) -> String {
+    if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+    if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
+    return "\(n)"
+}
+
+private func shortAge(_ date: Date) -> String {
+    let s = max(0, Int(Date().timeIntervalSince(date)))
+    if s < 60 { return "\(s)s" }
+    if s < 3600 { return "\(s / 60)m" }
+    if s < 86_400 { return "\(s / 3600)h" }
+    return "\(s / 86_400)d"
 }

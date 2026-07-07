@@ -17,10 +17,24 @@ struct UsageSnapshot: Equatable {
     var lastActivity: Date? = nil
 }
 
+struct AgentSession: Equatable, Identifiable {
+    let id: String
+    let product: Product
+    var sessionID: String? = nil
+    var title: String
+    var detail: String = "Working"
+    var inputTokens = 0
+    var outputTokens = 0
+    var lastActivity: Date
+    var cwd: String? = nil
+    var transcriptPath: String
+}
+
 // One observable holder shared by the SwiftUI hierarchies. Unchanged subtrees don't re-render.
 @Observable final class UsageStore {
     var snapshot = UsageSnapshot()
     var accounts: [AccountUsage] = []
+    var sessions: [AgentSession] = []
 }
 
 // Minimal decodable matching Claude Code assistant transcript lines. Unknown fields ignored.

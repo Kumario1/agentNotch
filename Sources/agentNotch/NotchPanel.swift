@@ -99,8 +99,8 @@ final class NotchController {
 
         // Black border extends 130pt into each wing and 10pt below the notch.
         let collapsed = CGSize(width: notch.width + 260, height: max(notch.height, 24) + 10)
-        // Height grows with account rows: chrome (~120) + ~110 per account card.
-        let height = max(210, CGFloat(120 + 110 * max(accountCount, 1)))
+        // Height grows with account rows, but session list/detail needs a usable floor.
+        let height = max(360, CGFloat(120 + 110 * max(accountCount, 1)))
         let expanded = CGSize(width: max(540, collapsed.width + 140), height: height)
         metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed, expanded: expanded)
         panelRect = CGRect(x: notch.midX - expanded.width / 2, y: notch.maxY - expanded.height,
@@ -133,6 +133,7 @@ final class NotchController {
 
     private func collapse() {
         guard ui.expanded else { return }
+        ui.selectedSessionID = nil
         ui.expanded = false
         updateTracking()
     }
