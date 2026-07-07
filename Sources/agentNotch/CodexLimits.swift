@@ -26,8 +26,9 @@ enum CodexLimits {
             } else {
                 name = fallback
             }
-            let resets = (w["resets_in_seconds"] as? Double).map { ts.addingTimeInterval($0) }
-            return LimitWindow(name: name, percent: pct, resetsAt: resets)
+            let resets = (w["resets_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+                ?? (w["resets_in_seconds"] as? Double).map { ts.addingTimeInterval($0) }
+            return LimitWindow(name: name, percent: 100 - pct, resetsAt: resets)
         }
 
         let windows = [window("primary", fallback: "5H"), window("secondary", fallback: "WEEK")]

@@ -44,7 +44,7 @@ enum Product: String, Equatable { case claude, codex }
 
 struct LimitWindow: Equatable {
     let name: String        // "5H", "7D", "OPUS", "WEEK"
-    let percent: Double     // 0–100 as reported by the source
+    let percent: Double     // 0–100 usage remaining
     let resetsAt: Date?
 }
 
@@ -93,7 +93,6 @@ struct AppConfig: Equatable {
 }
 
 extension AccountUsage {
-    var maxPercent: Double? { windows.map(\.percent).max() }
     var activityStamp: Date { lastActivity ?? asOf ?? .distantPast }
 }
 

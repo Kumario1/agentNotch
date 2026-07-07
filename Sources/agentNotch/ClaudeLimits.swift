@@ -29,7 +29,7 @@ enum ClaudeLimits {
             guard let w = obj[k.key] as? [String: Any],
                   let pct = w["utilization"] as? Double else { return nil }
             let resets = (w["resets_at"] as? String).flatMap(parseISO8601)
-            return LimitWindow(name: k.name, percent: pct, resetsAt: resets)
+            return LimitWindow(name: k.name, percent: 100 - pct, resetsAt: resets)
         }
     }
 

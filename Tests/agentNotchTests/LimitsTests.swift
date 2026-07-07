@@ -51,9 +51,10 @@ final class LimitsTests: XCTestCase {
         """.utf8)
         let w = ClaudeLimits.windows(fromUsageResponse: json)
         XCTAssertEqual(w.map(\.name), ["5H", "7D", "OPUS"])
-        XCTAssertEqual(w[0].percent, 12.5)
+        XCTAssertEqual(w[0].percent, 87.5)
         XCTAssertEqual(w[0].resetsAt, parseISO8601("2026-07-07T15:00:00Z"))
-        XCTAssertEqual(w[1].percent, 40)
+        XCTAssertEqual(w[1].percent, 60)
+        XCTAssertEqual(w[2].percent, 95)
         XCTAssertNil(w[2].resetsAt)
         XCTAssertEqual(ClaudeLimits.windows(fromUsageResponse: Data("[]".utf8)), [])
     }
@@ -75,11 +76,22 @@ final class LimitsTests: XCTestCase {
     func testCodexSnapshotParsing() {
         let s = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T10:00:00.000Z", primaryPct: 12.5, secondaryPct: 40))
         XCTAssertEqual(s?.windows.map(\.name), ["5H", "WEEK"])
-        XCTAssertEqual(s?.windows[0].percent, 12.5)
+        XCTAssertEqual(s?.windows[0].percent, 87.5)
         XCTAssertEqual(s?.asOf, parseISO8601("2026-07-07T10:00:00.000Z"))
         // resets_in_seconds is relative to the line timestamp
         XCTAssertEqual(s?.windows[0].resetsAt, parseISO8601("2026-07-07T11:00:00.000Z"))
         XCTAssertEqual(s?.windows[1].resetsAt, parseISO8601("2026-07-08T10:00:00.000Z"))
+    }
+
+    func testCodexSnapshotParsingAbsoluteResetEpoch() {
+        let json = Data("""
+        {"timestamp":"2026-07-06T21:27:58.240Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":96.0,"window_minutes":300,"resets_at":1783384679},"secondary":{"used_percent":49.0,"window_minutes":10080,"resets_at":1783894192}}}}
+        """.utf8)
+        let s = CodexLimits.snapshot(from: json)
+        XCTAssertEqual(s?.windows[0].percent, 4)
+        XCTAssertEqual(s?.windows[1].percent, 51)
+        XCTAssertEqual(s?.windows[0].resetsAt, Date(timeIntervalSince1970: 1_783_384_679))
+        XCTAssertEqual(s?.windows[1].resetsAt, Date(timeIntervalSince1970: 1_783_894_192))
     }
 
     func testCodexNonRateLimitLinesReturnNil() {
@@ -91,7 +103,7 @@ final class LimitsTests: XCTestCase {
         let old = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T10:00:00.000Z", primaryPct: 10, secondaryPct: 10))!
         let new = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T11:00:00.000Z", primaryPct: 20, secondaryPct: 20))!
         let latest = [new, old].max { $0.asOf < $1.asOf }!
-        XCTAssertEqual(latest.windows[0].percent, 20)
+        XCTAssertEqual(latest.windows[0].percent, 80)
     }
 
     func testCodexEmailFromJWT() {

@@ -44,12 +44,14 @@ struct NotchShape: Shape {
 // MARK: - Palette (warm Claude tones from the reference)
 
 private let peach = Color(red: 0.93, green: 0.65, blue: 0.46)        // ring / bar fill
-private let claudeOrange = Color(red: 0.85, green: 0.47, blue: 0.34) // asterisk mark
+private let claudeOrange = Color(red: 0.90, green: 0.56, blue: 0.36) // asterisk mark — 2026 logo: more orange, less red
+private let codexAccent = Color(white: 0.78)                         // Codex stays neutral; orange theme is Claude-only
 private let dangerRed = Color(red: 0.90, green: 0.28, blue: 0.28)
 
-// Claude orange until the window is nearly full, then red.
-private func usageColor(_ fraction: Double) -> Color {
-    fraction < 0.85 ? claudeOrange : dangerRed
+// Remaining percent: low remaining is danger; otherwise keep product color.
+private func usageColor(_ fraction: Double, _ product: Product) -> Color {
+    if fraction <= 0.15 { return dangerRed }
+    return product == .claude ? claudeOrange : codexAccent
 }
 
 // Real behind-window translucency: SwiftUI materials only blur within their own
@@ -100,7 +102,7 @@ struct NotchRootView: View {
                 .opacity(exp ? 1 : 0)
             NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13)
                 .fill(LinearGradient(colors: [Color(red: 0.30, green: 0.15, blue: 0.11),
-                                              Color(red: 0.22, green: 0.10, blue: 0.18)],
+                                              Color(red: 0.20, green: 0.11, blue: 0.08)],
                                      startPoint: .topLeading, endPoint: .bottomTrailing))
                 .opacity(exp ? 0.42 : 0)
             NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13)
@@ -158,11 +160,27 @@ private struct CodexTile: View {
                     .stroke(.white.opacity(0.08), lineWidth: 1)
             )
             .overlay(
-                Image(systemName: "terminal")
-                    .font(.system(size: size * 0.42, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.85))
+                ZStack {
+                    ForEach(0..<6, id: \.self) { i in
+                        Capsule()
+                            .fill(.white.opacity(0.88))
+                            .frame(width: size * 0.10, height: size * 0.34)
+                            .offset(y: -size * 0.13)
+                            .rotationEffect(.degrees(Double(i) * 60))
+                    }
+                    Circle()
+                        .fill(Color(white: 0.13))
+                        .frame(width: size * 0.20, height: size * 0.20)
+                }
             )
             .frame(width: size, height: size)
+    }
+}
+
+private func productName(_ p: Product) -> String {
+    switch p {
+    case .claude: "Claude Code"
+    case .codex: "Codex"
     }
 }
 
@@ -176,6 +194,7 @@ private struct CodexTile: View {
 // Radial ring gauge: dark coin, peach arc, percentage in the middle.
 private struct RingGauge: View {
     let fraction: Double
+    let product: Product
     var size: CGFloat = 24
 
     private let lineWidth: CGFloat = 2.5
@@ -188,7 +207,7 @@ private struct RingGauge: View {
                 .padding(lineWidth / 2)
             Circle()
                 .trim(from: 0, to: max(fraction, 0.02))
-                .stroke(usageColor(fraction), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .stroke(usageColor(fraction, product), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .padding(lineWidth / 2)
             Text("\(Int(fraction * 100))")
@@ -220,10 +239,10 @@ private struct CollapsedContent: View {
     @ViewBuilder private func wing(_ p: Product) -> some View {
         HStack(spacing: 8) {
             productTile(p, size: 24)
-            if let a = store.activeAccount(p), let pct = a.maxPercent {
-                RingGauge(fraction: min(max(pct / 100, 0), 1))
+            if let a = store.activeAccount(p), let pct = a.windows.map(\.percent).min() {
+                RingGauge(fraction: min(max(pct / 100, 0), 1), product: p)
             } else {
-                RingGauge(fraction: 0).opacity(0.3)
+                RingGauge(fraction: 0, product: p).opacity(0.3)
             }
         }
     }
@@ -237,12 +256,12 @@ private struct ExpandedContent: View {
     var body: some View {
         let s = store.snapshot
         VStack(alignment: .leading, spacing: 10) {
-            Text("AGENT LIMITS")
+            Text("USAGE REMAINING")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .tracking(2)
                 .foregroundStyle(.white.opacity(0.45))
             if store.accounts.isEmpty {
-                Text("waiting for account data…")
+                Text("waiting for account data...")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
             }
@@ -274,7 +293,7 @@ private struct AccountRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 productTile(account.product, size: 26)
-                Text(account.label)
+                Text("\(account.label) - \(productName(account.product))")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1).truncationMode(.middle)
@@ -291,7 +310,7 @@ private struct AccountRow: View {
                     .foregroundStyle(dangerRed.opacity(0.9))
             } else {
                 ForEach(account.windows, id: \.name) { w in
-                    WindowBarRow(window: w)
+                    WindowBarRow(window: w, product: account.product)
                 }
             }
         }
@@ -305,6 +324,7 @@ private struct AccountRow: View {
 
 private struct WindowBarRow: View {
     let window: LimitWindow
+    let product: Product
 
     var body: some View {
         let f = min(max(window.percent / 100, 0), 1)
@@ -316,7 +336,7 @@ private struct WindowBarRow: View {
             Capsule().fill(.white.opacity(0.15))
                 .overlay(alignment: .leading) {
                     GeometryReader { g in
-                        Capsule().fill(usageColor(f))
+                        Capsule().fill(usageColor(f, product))
                             .frame(width: max(g.size.width * f, f > 0 ? 6 : 0))
                     }
                 }
