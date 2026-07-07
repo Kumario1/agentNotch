@@ -63,4 +63,45 @@ final class LimitsTests: XCTestCase {
         XCTAssertEqual(ClaudeLimits.email(fromClaudeJSON: json), "me@example.com")
         XCTAssertNil(ClaudeLimits.email(fromClaudeJSON: Data("{}".utf8)))
     }
+
+    // MARK: Codex parsers
+
+    private func codexLine(ts: String, primaryPct: Double, secondaryPct: Double) -> Data {
+        Data("""
+        {"timestamp":"\(ts)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10}},"rate_limits":{"primary":{"used_percent":\(primaryPct),"window_minutes":300,"resets_in_seconds":3600},"secondary":{"used_percent":\(secondaryPct),"window_minutes":10080,"resets_in_seconds":86400}}}}
+        """.utf8)
+    }
+
+    func testCodexSnapshotParsing() {
+        let s = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T10:00:00.000Z", primaryPct: 12.5, secondaryPct: 40))
+        XCTAssertEqual(s?.windows.map(\.name), ["5H", "WEEK"])
+        XCTAssertEqual(s?.windows[0].percent, 12.5)
+        XCTAssertEqual(s?.asOf, parseISO8601("2026-07-07T10:00:00.000Z"))
+        // resets_in_seconds is relative to the line timestamp
+        XCTAssertEqual(s?.windows[0].resetsAt, parseISO8601("2026-07-07T11:00:00.000Z"))
+        XCTAssertEqual(s?.windows[1].resetsAt, parseISO8601("2026-07-08T10:00:00.000Z"))
+    }
+
+    func testCodexNonRateLimitLinesReturnNil() {
+        XCTAssertNil(CodexLimits.snapshot(from: Data(#"{"timestamp":"2026-07-07T10:00:00Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}"#.utf8)))
+        XCTAssertNil(CodexLimits.snapshot(from: Data("not json".utf8)))
+    }
+
+    func testCodexNewerSnapshotWins() {
+        let old = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T10:00:00.000Z", primaryPct: 10, secondaryPct: 10))!
+        let new = CodexLimits.snapshot(from: codexLine(ts: "2026-07-07T11:00:00.000Z", primaryPct: 20, secondaryPct: 20))!
+        let latest = [new, old].max { $0.asOf < $1.asOf }!
+        XCTAssertEqual(latest.windows[0].percent, 20)
+    }
+
+    func testCodexEmailFromJWT() {
+        // JWT with payload {"email":"me@example.com"} (unsigned, base64url segments)
+        let payload = Data(#"{"email":"me@example.com"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let json = Data(#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.\#(payload).sig"}}"#.utf8)
+        XCTAssertEqual(CodexLimits.email(fromAuthJSON: json), "me@example.com")
+        XCTAssertNil(CodexLimits.email(fromAuthJSON: Data("{}".utf8)))
+    }
 }
