@@ -118,6 +118,13 @@ enum SessionParsing {
     }
 
     private static func applyCursor(_ obj: [String: Any], message: [String: Any]?, to s: inout AgentSession) {
+        // Cursor writes a `turn_ended` line when the agent finishes a turn. Without
+        // this the session would look "active" forever and never leave the list.
+        if obj["type"] as? String == "turn_ended" {
+            s.isActive = false
+            s.detail = "Done"
+            return
+        }
         let role = obj["role"] as? String ?? message?["role"] as? String
         guard let role else { return }
 

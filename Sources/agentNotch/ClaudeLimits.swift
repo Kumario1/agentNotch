@@ -49,6 +49,11 @@ final class ClaudeAccountProvider {
     private let queue: DispatchQueue
     private var timer: DispatchSourceTimer?
     private var last: AccountUsage?
+    // Last successful reading, kept so a transient failure (429, offline, blip)
+    // doesn't blank the notch to "offline / no stats".
+    private var lastGoodWindows: [LimitWindow] = []
+    private var lastGoodAsOf: Date?
+    private var backoffUntil: Date?
 
     init(dir: URL, onUpdate: @escaping (AccountUsage) -> Void) {
         self.dir = dir
@@ -105,6 +110,10 @@ final class ClaudeAccountProvider {
     }
 
     private func poll() {
+        // While rate-limited, keep the last published reading on screen and don't
+        // re-hit the endpoint (that's what earns the 429 in the first place).
+        if let until = backoffUntil, until > Date() { return }
+
         var acc = AccountUsage(id: "claude:\(dir.path)", product: .claude, label: label)
         acc.lastActivity = lastActivity
         guard let creds = credentials() else {
@@ -113,6 +122,7 @@ final class ClaudeAccountProvider {
             return
         }
         if let e = creds.expiresAt, e < Date() {
+            lastGoodWindows = []
             acc.status = "re-login needed"
             publish(acc)
             return
@@ -123,23 +133,42 @@ final class ClaudeAccountProvider {
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             guard let self else { return }
             self.queue.async {
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                if code == 401 {
-                    acc.status = "re-login needed"
-                } else if let data, code == 200 {
+                let http = resp as? HTTPURLResponse
+                let code = http?.statusCode ?? 0
+                if code == 200, let data {
                     let windows = ClaudeLimits.windows(fromUsageResponse: data)
                     if windows.isEmpty {
-                        acc.status = "unexpected response"
+                        self.applyStaleOrStatus(&acc, status: "unexpected response")
                     } else {
+                        self.lastGoodWindows = windows
+                        self.lastGoodAsOf = Date()
+                        self.backoffUntil = nil
                         acc.windows = windows
-                        acc.asOf = Date()
+                        acc.asOf = self.lastGoodAsOf
                     }
+                } else if code == 401 {
+                    self.lastGoodWindows = []
+                    acc.status = "re-login needed"
+                } else if code == 429 {
+                    let retry = http?.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 300
+                    self.backoffUntil = Date().addingTimeInterval(max(120, retry))
+                    self.applyStaleOrStatus(&acc, status: "rate limited")
                 } else {
-                    acc.status = "offline"
+                    self.applyStaleOrStatus(&acc, status: "offline")
                 }
                 self.publish(acc)
             }
         }.resume()
+    }
+
+    // Prefer the last good numbers over a bare error, so a hiccup never blanks the UI.
+    private func applyStaleOrStatus(_ acc: inout AccountUsage, status: String) {
+        if !lastGoodWindows.isEmpty {
+            acc.windows = lastGoodWindows
+            acc.asOf = lastGoodAsOf
+        } else {
+            acc.status = status
+        }
     }
 
     // Suppress no-op updates so the UI never re-renders on identical data.

@@ -33,22 +33,36 @@ enum CursorLimits {
         return (token?.isEmpty == false) ? token : nil
     }
 
-    // Map GetCurrentPeriodUsage `planUsage` into a remaining-% window that matches the
-    // Cursor dashboard headline ("You've used N% of your included usage" = spend/limit).
-    // Fall back to `totalPercentUsed` for plans that don't report a dollar limit.
+    // Map GetCurrentPeriodUsage `planUsage` into remaining-% windows that match the
+    // Cursor dashboard meters. The current API reports usage as percentages of the
+    // included budget — `apiPercentUsed` (named models, the "API" meter) and
+    // `autoPercentUsed` (Auto) — which the dashboard shows as separate bars. We keep
+    // both so the notch matches ("42% used" on the dashboard = ~58% remaining here).
     // `percent` is remaining (0–100), matching the Claude/Codex convention.
+    //
+    // Note: `totalSpend` can exceed `limit` thanks to free bonus usage, so the old
+    // spend/limit math produced a bogus "0% left" — hence the percentage fields win.
     static func windows(fromPeriodUsage data: Data) -> [LimitWindow] {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let plan = obj["planUsage"] as? [String: Any] else { return [] }
         let resetsAt = epochMillis(obj["billingCycleEnd"])
 
-        if let limit = numeric(plan["limit"]), limit > 0 {
-            let remaining = numeric(plan["remaining"]) ?? (limit - (numeric(plan["totalSpend"]) ?? 0))
-            let pct = clampPercent(remaining / limit * 100)
-            return [LimitWindow(name: "PLAN", percent: pct, resetsAt: resetsAt)]
+        var windows: [LimitWindow] = []
+        if let api = numeric(plan["apiPercentUsed"]), api.isFinite {
+            windows.append(LimitWindow(name: "API", percent: clampPercent(100 - api), resetsAt: resetsAt))
         }
+        if let auto = numeric(plan["autoPercentUsed"]), auto.isFinite {
+            windows.append(LimitWindow(name: "AUTO", percent: clampPercent(100 - auto), resetsAt: resetsAt))
+        }
+        if !windows.isEmpty { return windows }
+
+        // Fallbacks for plans that report a single figure instead of the split meters.
         if let used = numeric(plan["totalPercentUsed"]), used.isFinite {
             return [LimitWindow(name: "PLAN", percent: clampPercent(100 - used), resetsAt: resetsAt)]
+        }
+        if let limit = numeric(plan["limit"]), limit > 0 {
+            let remaining = numeric(plan["remaining"]) ?? (limit - (numeric(plan["totalSpend"]) ?? 0))
+            return [LimitWindow(name: "PLAN", percent: clampPercent(remaining / limit * 100), resetsAt: resetsAt)]
         }
         return []
     }
@@ -76,6 +90,9 @@ final class CursorAccountProvider {
     private let queue: DispatchQueue
     private var timer: DispatchSourceTimer?
     private var last: AccountUsage?
+    // Keep the last good reading so a transient failure doesn't blank the notch.
+    private var lastGoodWindows: [LimitWindow] = []
+    private var lastGoodAsOf: Date?
 
     init(dir: URL, onUpdate: @escaping (AccountUsage) -> Void) {
         self.dir = dir
@@ -132,21 +149,35 @@ final class CursorAccountProvider {
             self.queue.async {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code == 401 || code == 403 {
+                    self.lastGoodWindows = []
                     acc.status = "re-login needed"
                 } else if let data, code == 200 {
                     let windows = CursorLimits.windows(fromPeriodUsage: data)
                     if windows.isEmpty {
-                        acc.status = acc.lastActivity != nil ? "connected" : "no usage data"
+                        self.applyStaleOrStatus(&acc,
+                            status: acc.lastActivity != nil ? "connected" : "no usage data")
                     } else {
+                        self.lastGoodWindows = windows
+                        self.lastGoodAsOf = Date()
                         acc.windows = windows
-                        acc.asOf = Date()
+                        acc.asOf = self.lastGoodAsOf
                     }
                 } else {
-                    acc.status = "offline"
+                    self.applyStaleOrStatus(&acc, status: "offline")
                 }
                 self.publish(acc)
             }
         }.resume()
+    }
+
+    // Prefer the last good numbers over a bare error, so a hiccup never blanks the UI.
+    private func applyStaleOrStatus(_ acc: inout AccountUsage, status: String) {
+        if !lastGoodWindows.isEmpty {
+            acc.windows = lastGoodWindows
+            acc.asOf = lastGoodAsOf
+        } else {
+            acc.status = status
+        }
     }
 
     // Suppress no-op updates (asOf changes each successful poll; compare everything else).
