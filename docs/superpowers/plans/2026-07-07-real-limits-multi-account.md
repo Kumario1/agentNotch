@@ -42,7 +42,7 @@
 **Interfaces:**
 - Produces: `Product` (`.claude`/`.codex`), `LimitWindow{name:String, percent:Double, resetsAt:Date?}`, `AccountUsage{id, product, label, windows, asOf, lastActivity, status}`, `UsageStore.accounts: [AccountUsage]`, `AppConfig{claudeDirs:[URL], codexDirs:[URL]}` with `AppConfig.parse(_ data: Data?) -> AppConfig` and `AppConfig.load() -> AppConfig`, `parseISO8601(_ s: String) -> Date?`.
 
-- [ ] **Step 1: Initialize git and commit the baseline**
+- [x] **Step 1: Initialize git and commit the baseline**
 
 ```bash
 cd /Users/princekumar/Documents/agentNotch
@@ -52,7 +52,7 @@ git add -A
 git commit -m "chore: baseline before real-limits work"
 ```
 
-- [ ] **Step 2: Write failing tests for config parsing and ISO helper**
+- [x] **Step 2: Write failing tests for config parsing and ISO helper**
 
 Create `Tests/agentNotchTests/LimitsTests.swift`:
 
@@ -93,12 +93,12 @@ final class LimitsTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `swift test --filter LimitsTests`
 Expected: compile error — `AppConfig` / `parseISO8601` not defined.
 
-- [ ] **Step 4: Add models, config, ISO helper to Models.swift**
+- [x] **Step 4: Add models, config, ISO helper to Models.swift**
 
 Append to `Sources/agentNotch/Models.swift`:
 
@@ -168,12 +168,12 @@ And add the accounts array to `UsageStore` (replace the existing class body):
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `swift test --filter LimitsTests`
 Expected: 4 tests PASS. Also run `swift test` (all) — the existing `UsageEngineTests` must still pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A
