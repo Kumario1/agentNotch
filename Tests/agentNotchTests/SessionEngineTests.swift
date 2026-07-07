@@ -72,4 +72,23 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(s.detail, "Running Shell")
         XCTAssertTrue(s.isActive)
     }
+
+    // Real Cursor transcripts use type "tool_use" with an absolute `input.path` and carry
+    // no cwd; the parser must recover the project cwd/title from the slugged transcript path.
+    func testCursorRealFormatRecoversCwdAndTitle() {
+        let path = "/Users/me/.cursor/projects/Users-me-Documents-sentinel-dev/agent-transcripts/u/u.jsonl"
+        var s = SessionParsing.empty(path: path, product: .cursor, modifiedAt: .distantPast)
+
+        // Before any tool call, the hyphenated project name must not be mangled to "dev".
+        XCTAssertEqual(s.title, "sentinel-dev")
+
+        SessionParsing.apply(Data("""
+        {"role":"assistant","message":{"content":[{"type":"text","text":"Let me look"},{"type":"tool_use","name":"Read","input":{"path":"/Users/me/Documents/sentinel-dev/README.md"}}]}}
+        """.utf8), product: .cursor, to: &s)
+
+        XCTAssertEqual(s.cwd, "/Users/me/Documents/sentinel-dev")
+        XCTAssertEqual(s.title, "sentinel-dev")
+        XCTAssertEqual(s.detail, "Running Read")
+        XCTAssertTrue(s.isActive)
+    }
 }

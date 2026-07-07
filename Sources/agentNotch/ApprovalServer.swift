@@ -7,35 +7,52 @@ enum ApprovalPaths {
 }
 
 // Unix socket server: hook connects, sends one request JSON, blocks for a decision JSON back.
+//
+// Concurrency: each client is handled on the global concurrent queue so its blocking
+// wait for a user decision never stalls anything else. `acceptQueue` (serial) owns the
+// listen socket, and `stateQueue` (serial) guards `waiters`/`alwaysAllow` with only
+// fast, non-blocking work — so a decision can always be delivered while a client blocks.
 final class ApprovalServer {
     private let store: UsageStore
-    private let queue = DispatchQueue(label: "agentNotch.approvals", qos: .userInitiated)
+    private let socketPath: String
+    private let alwaysAllowPath: String
+    private let acceptQueue = DispatchQueue(label: "agentNotch.approvals.accept", qos: .userInitiated)
+    private let stateQueue = DispatchQueue(label: "agentNotch.approvals.state", qos: .userInitiated)
+    private let handlerQueue = DispatchQueue(label: "agentNotch.approvals.handler",
+                                             qos: .userInitiated, attributes: .concurrent)
     private var source: DispatchSourceRead?
     private var serverFD: Int32 = -1
     private var waiters: [String: (ApprovalDecision) -> Void] = [:]
     private var alwaysAllow: Set<String> = []
 
-    init(store: UsageStore) {
+    init(store: UsageStore,
+         socketPath: String = ApprovalPaths.socket,
+         alwaysAllowPath: String = ApprovalPaths.alwaysAllow) {
         self.store = store
+        self.socketPath = socketPath
+        self.alwaysAllowPath = alwaysAllowPath
         loadAlwaysAllow()
     }
 
     func start() {
-        queue.async { [weak self] in self?.listen() }
+        acceptQueue.async { [weak self] in self?.listen() }
     }
 
+    // Called on the main thread from the notch UI (button / key monitor).
     func decide(_ id: String, decision: ApprovalDecision) {
-        queue.async { [weak self] in
+        let alwaysKey = decision == .always
+            ? store.pendingApprovals.first(where: { $0.id == id })?.alwaysKey
+            : nil
+        store.pendingApprovals.removeAll { $0.id == id }
+
+        stateQueue.async { [weak self] in
             guard let self else { return }
-            if decision == .always, let req = self.store.pendingApprovals.first(where: { $0.id == id }) {
-                self.alwaysAllow.insert(req.alwaysKey)
+            if let alwaysKey {
+                self.alwaysAllow.insert(alwaysKey)
                 self.saveAlwaysAllow()
             }
             let effective: ApprovalDecision = decision == .always ? .allow : decision
             self.waiters.removeValue(forKey: id)?(effective)
-            DispatchQueue.main.async {
-                self.store.pendingApprovals.removeAll { $0.id == id }
-            }
         }
     }
 
@@ -43,15 +60,16 @@ final class ApprovalServer {
 
     private func listen() {
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: ApprovalPaths.home, withIntermediateDirectories: true)
-        unlink(ApprovalPaths.socket)
+        try? fm.createDirectory(atPath: (socketPath as NSString).deletingLastPathComponent,
+                                withIntermediateDirectories: true)
+        unlink(socketPath)
 
         serverFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard serverFD >= 0 else { return }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        ApprovalPaths.socket.withCString { cstr in
+        socketPath.withCString { cstr in
             withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
                 let dst = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
                 strncpy(dst, cstr, 104)
@@ -65,7 +83,7 @@ final class ApprovalServer {
         }
         guard bound == 0, Darwin.listen(serverFD, 8) == 0 else { close(serverFD); return }
 
-        let src = DispatchSource.makeReadSource(fileDescriptor: serverFD, queue: queue)
+        let src = DispatchSource.makeReadSource(fileDescriptor: serverFD, queue: acceptQueue)
         src.setEventHandler { [weak self] in self?.acceptOne() }
         src.resume()
         source = src
@@ -74,7 +92,9 @@ final class ApprovalServer {
     private func acceptOne() {
         let client = accept(serverFD, nil, nil)
         guard client >= 0 else { return }
-        queue.async { [weak self] in self?.handle(clientFD: client) }
+        // Handle on a concurrent queue: this call blocks until the user decides, and
+        // must not stall the accept source or the state queue that delivers decisions.
+        handlerQueue.async { [weak self] in self?.handle(clientFD: client) }
     }
 
     private func handle(clientFD: Int32) {
@@ -91,7 +111,8 @@ final class ApprovalServer {
               let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return }
 
         let request = parseRequest(obj)
-        if alwaysAllow.contains(request.alwaysKey) {
+        let autoAllow = stateQueue.sync { alwaysAllow.contains(request.alwaysKey) }
+        if autoAllow {
             writeDecision(clientFD, request: request, decision: .allow)
             return
         }
@@ -108,12 +129,14 @@ final class ApprovalServer {
                 store.pendingApprovals.append(request)
             }
         }
-        waiters[request.id] = { decision in
-            result = decision
-            sem.signal()
+        stateQueue.async { [weak self] in
+            self?.waiters[request.id] = { decision in
+                result = decision
+                sem.signal()
+            }
         }
         sem.wait()
-        waiters.removeValue(forKey: request.id)
+        stateQueue.async { [weak self] in self?.waiters.removeValue(forKey: request.id) }
         return result
     }
 
@@ -171,13 +194,13 @@ final class ApprovalServer {
     // MARK: - Always allow persistence
 
     private func loadAlwaysAllow() {
-        guard let data = FileManager.default.contents(atPath: ApprovalPaths.alwaysAllow),
+        guard let data = FileManager.default.contents(atPath: alwaysAllowPath),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return }
         alwaysAllow = Set(arr)
     }
 
     private func saveAlwaysAllow() {
         let data = (try? JSONSerialization.data(withJSONObject: Array(alwaysAllow).sorted())) ?? Data("[]".utf8)
-        try? data.write(to: URL(fileURLWithPath: ApprovalPaths.alwaysAllow), options: .atomic)
+        try? data.write(to: URL(fileURLWithPath: alwaysAllowPath), options: .atomic)
     }
 }

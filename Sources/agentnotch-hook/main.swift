@@ -35,13 +35,18 @@ struct AgentNotchHook {
             }
         }
 
+        // The product is known from the request we send; the server's response only
+        // needs to carry the decision. Deriving the product from the response is wrong
+        // (the server doesn't echo it) and would format every reply as Claude.
+        let product = payload["product"] as? String ?? "claude"
+
         guard let reqData = try? JSONSerialization.data(withJSONObject: payload) else {
-            failOpen(product: payload["product"] as? String)
+            failOpen(product: product)
             return
         }
 
-        guard let resp = roundTrip(reqData) else {
-            failOpen(product: payload["product"] as? String)
+        guard let resp = roundTrip(reqData, product: product) else {
+            failOpen(product: product)
             return
         }
 
@@ -49,7 +54,7 @@ struct AgentNotchHook {
         if resp.last != 0x0A { FileHandle.standardOutput.write(Data([0x0A])) }
     }
 
-    private static func roundTrip(_ request: Data) -> Data? {
+    private static func roundTrip(_ request: Data, product: String) -> Data? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -85,7 +90,6 @@ struct AgentNotchHook {
         guard !buf.isEmpty else { return nil }
 
         guard let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return buf }
-        let product = payloadString(obj, key: "product") ?? "claude"
         let decision = payloadString(obj, key: "decision") ?? "allow"
         return formatOutput(product: product, decision: decision)
     }

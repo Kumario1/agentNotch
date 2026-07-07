@@ -106,6 +106,41 @@ final class LimitsTests: XCTestCase {
         XCTAssertEqual(latest.windows[0].percent, 80)
     }
 
+    // MARK: Cursor parsers
+
+    // Real payload shape: included-budget meter (spend/limit) drives the headline number.
+    func testCursorPeriodUsageUsesIncludedBudget() {
+        let json = Data("""
+        {"billingCycleEnd":"1786116841000",
+         "planUsage":{"totalSpend":1529,"remaining":471,"limit":2000,"totalPercentUsed":16.98}}
+        """.utf8)
+        let w = CursorLimits.windows(fromPeriodUsage: json)
+        XCTAssertEqual(w.map(\.name), ["PLAN"])
+        XCTAssertEqual(w[0].percent, 23.55, accuracy: 0.01, "471/2000 remaining, not totalPercentUsed")
+        XCTAssertEqual(w[0].resetsAt, Date(timeIntervalSince1970: 1_786_116_841))
+    }
+
+    func testCursorPeriodUsageDerivesRemainingFromSpendWhenAbsent() {
+        let json = Data(#"{"planUsage":{"totalSpend":500,"limit":2000}}"#.utf8)
+        let w = CursorLimits.windows(fromPeriodUsage: json)
+        XCTAssertEqual(w[0].percent, 75, "remaining = (limit - totalSpend)/limit")
+    }
+
+    func testCursorPeriodUsageFallsBackToPercentWhenNoLimit() {
+        let json = Data(#"{"planUsage":{"totalPercentUsed":40}}"#.utf8)
+        let w = CursorLimits.windows(fromPeriodUsage: json)
+        XCTAssertEqual(w.map(\.name), ["PLAN"])
+        XCTAssertEqual(w[0].percent, 60)
+    }
+
+    func testCursorPeriodUsageEmptyAndClamped() {
+        XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: Data("{}".utf8)), [])
+        XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: Data("not json".utf8)), [])
+        let over = Data(#"{"planUsage":{"remaining":-50,"limit":2000}}"#.utf8)
+        XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: over)[0].percent, 0,
+                       "remaining must clamp to 0, never negative")
+    }
+
     func testCodexEmailFromJWT() {
         // JWT with payload {"email":"me@example.com"} (unsigned, base64url segments)
         let payload = Data(#"{"email":"me@example.com"}"#.utf8).base64EncodedString()

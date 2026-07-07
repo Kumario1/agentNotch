@@ -121,6 +121,16 @@ enum SessionParsing {
         let role = obj["role"] as? String ?? message?["role"] as? String
         guard let role else { return }
 
+        // Cursor transcripts carry no `cwd`; recover it (and a real title) by matching an
+        // absolute path from a tool call against the project-dir slug in the transcript path.
+        if s.cwd == nil,
+           let slug = cursorSlug(fromPath: s.transcriptPath),
+           let input = firstToolInput(message?["content"]),
+           let cwd = cursorCwd(forToolInput: input, slug: slug) {
+            s.cwd = cwd
+            s.title = title(from: cwd, fallbackPath: s.transcriptPath)
+        }
+
         if role == "assistant" {
             s.isActive = true
             if let tool = toolName(message?["content"]) {
@@ -161,14 +171,68 @@ enum SessionParsing {
             if !name.isEmpty { return name }
         }
         // Cursor paths: .../projects/Users-foo-bar/agent-transcripts/uuid/uuid.jsonl
-        let parts = fallbackPath.split(separator: "/")
-        if let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count {
-            let slug = String(parts[idx + 1])
-            let name = slug.split(separator: "-").last.map(String.init) ?? slug
+        // The slug is an absolute path with "/" replaced by "-"; we can't perfectly
+        // reverse it (project names may contain "-"), so show the trailing segment after
+        // the last known container ("Documents", "Desktop", ...) rather than a lone word.
+        if let slug = cursorSlug(fromPath: fallbackPath) {
+            let name = projectName(fromSlug: slug)
             if !name.isEmpty { return name }
         }
         let parent = URL(fileURLWithPath: fallbackPath).deletingLastPathComponent().lastPathComponent
         return parent.isEmpty ? "Session" : parent
+    }
+
+    // Cursor project-dir slug lives right after "projects" in the transcript path.
+    static func cursorSlug(fromPath path: String) -> String? {
+        let parts = path.split(separator: "/")
+        guard let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count else { return nil }
+        return String(parts[idx + 1])
+    }
+
+    // Best-effort readable name from a slug when no real cwd is known yet.
+    private static func projectName(fromSlug slug: String) -> String {
+        let containers: Set<String> = ["Documents", "Desktop", "Downloads", "Developer", "code", "src", "projects", "work", "repos", "git", "worktrees"]
+        let comps = slug.split(separator: "-").map(String.init)
+        if let last = comps.lastIndex(where: { containers.contains($0) }), last + 1 < comps.count {
+            return comps[(last + 1)...].joined(separator: "-")
+        }
+        return comps.last ?? slug
+    }
+
+    // Resolve the working directory by matching a tool call's absolute path (or an
+    // ancestor of it) against the project slug — slugify(dir) == slug pins the exact cwd.
+    static func cursorCwd(forToolInput input: [String: Any], slug: String) -> String? {
+        let candidates = ["path", "target_directory", "targetDirectory", "file", "filePath", "cwd"]
+            .compactMap { input[$0] as? String }
+            .filter { $0.hasPrefix("/") }
+        for abs in candidates {
+            var dir = URL(fileURLWithPath: abs)
+            for _ in 0..<20 {
+                if slugify(dir.path) == slug { return dir.path }
+                let parent = dir.deletingLastPathComponent()
+                if parent.path == dir.path { break }
+                dir = parent
+            }
+        }
+        return nil
+    }
+
+    private static func slugify(_ path: String) -> String {
+        var p = path
+        if p.hasPrefix("/") { p.removeFirst() }
+        if p.hasSuffix("/") { p.removeLast() }
+        return p.replacingOccurrences(of: "/", with: "-")
+    }
+
+    private static func firstToolInput(_ content: Any?) -> [String: Any]? {
+        guard let parts = content as? [[String: Any]] else { return nil }
+        for p in parts {
+            let type = p["type"] as? String
+            if type == "tool_use" || type == "tool_call" {
+                return p["input"] as? [String: Any] ?? p["args"] as? [String: Any]
+            }
+        }
+        return nil
     }
 
     private static func toolName(_ content: Any?) -> String? {

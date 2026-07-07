@@ -2,7 +2,7 @@
 
 **Goal:** a buttery-smooth macOS notch app that surfaces coding-agent sessions, usage limits, and permission prompts — local-only, Apple Silicon, macOS 14+. No Electron, no polling, no jank.
 
-**Non-goals (for now):** dev-server port watcher · packaged `.app` distribution · Cursor quota bars (no reliable local source).
+**Non-goals (for now):** dev-server port watcher · packaged `.app` distribution.
 
 ---
 
@@ -78,16 +78,18 @@ Claude via OAuth usage endpoint; Codex via `rate_limits` in session rollouts; pe
 **Plan**
 - `Product.cursor`; `CursorTile` branding; collapsed wings show two most-recently-active accounts across all products.
 - `SessionEngine` scans `~/.cursor/projects/*/agent-transcripts/**/*.jsonl`; `SessionParsing.applyCursor`.
-- `CursorAccountProvider`: presence + last-activity status (no quota bars until an authenticated source exists).
+- `CursorAccountProvider`: presence + last-activity status, plus real current-period usage
+  when signed in (reads `cursorAuth/accessToken` from Cursor's `state.vscdb` and calls
+  `api2.cursor.sh/.../GetCurrentPeriodUsage`; included-budget remaining % + reset date).
 - Product filter chip for Cursor in expanded panel.
 
-**Acceptance:** active Cursor agent sessions appear in the notch list; Cursor account row shows last activity.
+**Acceptance:** active Cursor agent sessions appear in the notch list; Cursor account row shows last activity and included-usage remaining.
 
 ---
 
 ## Later (explicitly deferred)
 
-Dev-server port watcher (3000–9999) · tool-call timelines per session · stuck-session alerts · packaged `.app` with bundled hook binary · Codex end-to-end approvals · Cursor quota via authenticated API.
+Dev-server port watcher (3000–9999) · tool-call timelines per session · stuck-session alerts · packaged `.app` with bundled hook binary · Codex end-to-end approvals.
 
 ## Step 6 — Claude account switching (done)
 
