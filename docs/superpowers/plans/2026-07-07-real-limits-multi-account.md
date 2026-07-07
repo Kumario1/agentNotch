@@ -1,6 +1,6 @@
 # Real Limits + Multi-Account Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Show real usage-limit data (utilization % + reset times) per account for Claude Code and Codex in the notch UI, replacing guessed token caps.
 
@@ -192,7 +192,7 @@ git commit -m "feat: account/limit models, config file, ISO helper"
 - Consumes: `LimitWindow`, `parseISO8601` from Task 1.
 - Produces: `ClaudeCredentials{accessToken:String, expiresAt:Date?}`, `ClaudeLimits.credentials(from: Data) -> ClaudeCredentials?`, `ClaudeLimits.windows(fromUsageResponse: Data) -> [LimitWindow]`, `ClaudeLimits.email(fromClaudeJSON: Data) -> String?`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Append to `Tests/agentNotchTests/LimitsTests.swift` (inside the class):
 
@@ -230,12 +230,12 @@ Append to `Tests/agentNotchTests/LimitsTests.swift` (inside the class):
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `swift test --filter LimitsTests`
 Expected: compile error — `ClaudeLimits` not defined.
 
-- [ ] **Step 3: Implement parsers**
+- [x] **Step 3: Implement parsers**
 
 Create `Sources/agentNotch/ClaudeLimits.swift`:
 
@@ -284,12 +284,12 @@ enum ClaudeLimits {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter LimitsTests`
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -309,7 +309,7 @@ git commit -m "feat: Claude credential/usage/email parsers"
 
 No unit test — this class is IO/network glue; parsers were tested in Task 2. Verify by build + manual run in Task 7.
 
-- [ ] **Step 1: Implement the provider**
+- [x] **Step 1: Implement the provider**
 
 Append to `Sources/agentNotch/ClaudeLimits.swift`:
 
@@ -425,12 +425,12 @@ final class ClaudeAccountProvider {
 }
 ```
 
-- [ ] **Step 2: Verify it builds and all tests still pass**
+- [x] **Step 2: Verify it builds and all tests still pass**
 
 Run: `swift build && swift test`
 Expected: clean build, all tests PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A
@@ -449,7 +449,7 @@ git commit -m "feat: Claude account provider polling OAuth usage endpoint"
 - Consumes: `LimitWindow`, `parseISO8601` (Task 1).
 - Produces: `CodexSnapshot{windows:[LimitWindow], asOf:Date}` (Equatable), `CodexLimits.snapshot(from line: Data) -> CodexSnapshot?`, `CodexLimits.email(fromAuthJSON: Data) -> String?`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Append inside `LimitsTests`:
 
@@ -496,12 +496,12 @@ Append inside `LimitsTests`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `swift test --filter LimitsTests`
 Expected: compile error — `CodexLimits` not defined.
 
-- [ ] **Step 3: Implement parsers**
+- [x] **Step 3: Implement parsers**
 
 Create `Sources/agentNotch/CodexLimits.swift`:
 
@@ -563,12 +563,12 @@ enum CodexLimits {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter LimitsTests`
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -588,7 +588,7 @@ git commit -m "feat: Codex rate-limit and auth.json parsers"
 
 Deviation from spec noted: a 15s incremental timer scan instead of nested DispatchSource watches — sessions live in `sessions/YYYY/MM/DD/` and watching a rolling date tree is fiddly; reads stay byte-offset incremental so cost is ~zero. (`ponytail:` comment in code.)
 
-- [ ] **Step 1: Implement the provider**
+- [x] **Step 1: Implement the provider**
 
 Append to `Sources/agentNotch/CodexLimits.swift`:
 
@@ -694,12 +694,12 @@ final class CodexAccountProvider {
 }
 ```
 
-- [ ] **Step 2: Verify it builds and all tests still pass**
+- [x] **Step 2: Verify it builds and all tests still pass**
 
 Run: `swift build && swift test`
 Expected: clean build, all tests PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A
@@ -719,7 +719,7 @@ git commit -m "feat: Codex account provider scanning session rollouts"
 - Consumes: `AppConfig` (Task 1), both providers (Tasks 3, 5).
 - Produces: `LimitsEngine(config: AppConfig, onPublish: @escaping ([AccountUsage]) -> Void)` with `func start()` — `onPublish` fires on the **main queue** with the full sorted account list. `NotchController.setAccountCount(_ n: Int)` recomputes geometry.
 
-- [ ] **Step 1: Implement LimitsEngine**
+- [x] **Step 1: Implement LimitsEngine**
 
 Create `Sources/agentNotch/LimitsEngine.swift`:
 
@@ -759,7 +759,7 @@ final class LimitsEngine {
 }
 ```
 
-- [ ] **Step 2: Dynamic expanded height in NotchPanel.swift**
+- [x] **Step 2: Dynamic expanded height in NotchPanel.swift**
 
 In `NotchController`, add an account count field and setter, and use it in `computeRects()`. Replace the line
 
@@ -787,7 +787,7 @@ and add to the class (next to the other stored properties):
     }
 ```
 
-- [ ] **Step 3: Wire it in main.swift**
+- [x] **Step 3: Wire it in main.swift**
 
 Replace the body of `applicationDidFinishLaunching` in `Sources/agentNotch/main.swift`:
 
@@ -818,12 +818,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 ```
 
-- [ ] **Step 4: Verify build and tests**
+- [x] **Step 4: Verify build and tests**
 
 Run: `swift build && swift test`
 Expected: clean build, all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -842,7 +842,7 @@ git commit -m "feat: LimitsEngine merges providers into the store; dynamic panel
 - Consumes: `UsageStore.accounts`, `AccountUsage`, `LimitWindow`, `Product`.
 - Produces: UI only.
 
-- [ ] **Step 1: Add selection helpers**
+- [x] **Step 1: Add selection helpers**
 
 Append to `Sources/agentNotch/Models.swift`:
 
@@ -861,7 +861,7 @@ extension UsageStore {
 }
 ```
 
-- [ ] **Step 2: Rework NotchView.swift**
+- [x] **Step 2: Rework NotchView.swift**
 
 In `Sources/agentNotch/NotchView.swift`:
 
@@ -1049,12 +1049,12 @@ private struct WindowBarRow: View {
 
 **(e)** In `Sources/agentNotch/UsageEngine.swift`, delete the two cap constants and their comment block (`fiveHourCap` / `sevenDayCap` lines 3–6). Nothing else references them after (d).
 
-- [ ] **Step 3: Verify build and tests**
+- [x] **Step 3: Verify build and tests**
 
 Run: `swift build && swift test`
 Expected: clean build, all tests PASS.
 
-- [ ] **Step 4: Manual acceptance run**
+- [ ] **Step 4: Manual acceptance run** (LEFT FOR HUMAN — executor cannot observe the GUI; `swift build -c release` verified to succeed)
 
 Run: `swift run -c release` (needs a logged-in `~/.claude`; `~/.codex` optional).
 Expected within ~60s of launch:
@@ -1064,7 +1064,7 @@ Expected within ~60s of launch:
 
 Kill with Ctrl-C.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -1075,12 +1075,12 @@ git commit -m "feat: per-account limit UI in collapsed and expanded notch"
 
 ### Task 8: Final verification
 
-- [ ] **Step 1: Full test suite + release build**
+- [x] **Step 1: Full test suite + release build**
 
 Run: `swift test && swift build -c release`
 Expected: all tests PASS, clean release build.
 
-- [ ] **Step 2: Update ROADMAP.md**
+- [x] **Step 2: Update ROADMAP.md**
 
 Append under a new section at the end of `ROADMAP.md`:
 
@@ -1094,7 +1094,7 @@ the expanded panel; collapsed wings show the most-recently-active account per
 product. Spec: `docs/superpowers/specs/2026-07-07-real-limits-multi-account-design.md`.
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A
