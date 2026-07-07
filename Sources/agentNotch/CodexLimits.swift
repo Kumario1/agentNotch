@@ -53,3 +53,103 @@ enum CodexLimits {
         return claims["email"] as? String
     }
 }
+
+// Scans <dir>/sessions/**/rollout-*.jsonl for the newest rate_limits snapshot.
+// ponytail: 15s timer scan instead of FS watches — the rolling YYYY/MM/DD dir tree
+// makes watch trees fiddly, and reads are byte-offset incremental so a scan is ~free.
+// Upgrade to DispatchSource watches if the 15s latency ever matters.
+final class CodexAccountProvider {
+    private let dir: URL
+    private let onUpdate: (AccountUsage) -> Void
+    private let queue: DispatchQueue
+    private var timer: DispatchSourceTimer?
+    private var offsets: [String: UInt64] = [:]
+    private var partials: [String: Data] = [:]
+    private var latest: CodexSnapshot?
+    private var didInitialScan = false
+    private var last: AccountUsage?
+
+    init(dir: URL, onUpdate: @escaping (AccountUsage) -> Void) {
+        self.dir = dir
+        self.onUpdate = onUpdate
+        self.queue = DispatchQueue(label: "agentNotch.codex.\(dir.lastPathComponent)", qos: .utility)
+    }
+
+    func start() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: 15)
+        t.setEventHandler { [weak self] in self?.scan() }
+        timer = t
+        t.resume()
+    }
+
+    private var label: String {
+        let f = dir.appendingPathComponent("auth.json")
+        if let d = FileManager.default.contents(atPath: f.path), let e = CodexLimits.email(fromAuthJSON: d) {
+            return e
+        }
+        return dir.lastPathComponent
+    }
+
+    private func scan() {
+        let sessions = dir.appendingPathComponent("sessions")
+        var candidates: [(url: URL, mtime: Date)] = []
+        if let en = FileManager.default.enumerator(
+            at: sessions, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for case let f as URL in en where f.pathExtension == "jsonl" {
+                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                candidates.append((f, m))
+            }
+        }
+        // Recent files always; plus (on first scan only) the single newest file even
+        // if old — the last-known weekly number matters after days of no Codex use.
+        let cutoff = Date().addingTimeInterval(-48 * 3600)
+        var toRead = candidates.filter { $0.mtime >= cutoff }
+        if !didInitialScan, toRead.isEmpty, let newest = candidates.max(by: { $0.mtime < $1.mtime }) {
+            toRead = [newest]
+        }
+        didInitialScan = true
+        for c in toRead { ingest(path: c.url.path) }
+        publish()
+    }
+
+    // Same incremental pattern as UsageEngine: only appended bytes, buffered partial lines.
+    private func ingest(path: String) {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? fh.close() }
+        var offset = offsets[path] ?? 0
+        try? fh.seek(toOffset: offset)
+        var buf = partials[path] ?? Data()
+        while let chunk = try? fh.read(upToCount: 65_536), !chunk.isEmpty {
+            offset += UInt64(chunk.count)
+            buf.append(chunk)
+            while let nl = buf.firstIndex(of: 0x0A) {
+                let line = buf.subdata(in: buf.startIndex..<nl)
+                buf.removeSubrange(buf.startIndex...nl)
+                if let s = CodexLimits.snapshot(from: line),
+                   latest == nil || s.asOf > latest!.asOf { latest = s }
+            }
+        }
+        partials[path] = buf
+        offsets[path] = offset
+    }
+
+    private func publish() {
+        var acc = AccountUsage(id: "codex:\(dir.path)", product: .codex, label: label)
+        if let snap = latest {
+            // A window that has already reset since the snapshot reads as 0%.
+            acc.windows = snap.windows.map { w in
+                if let r = w.resetsAt, r < Date() {
+                    return LimitWindow(name: w.name, percent: 0, resetsAt: nil)
+                }
+                return w
+            }
+            acc.asOf = snap.asOf
+            acc.lastActivity = snap.asOf
+        } else {
+            acc.status = FileManager.default.fileExists(atPath: dir.appendingPathComponent("sessions").path)
+                ? "no usage data yet" : "not found"
+        }
+        if acc != last { last = acc; onUpdate(acc) }
+    }
+}
