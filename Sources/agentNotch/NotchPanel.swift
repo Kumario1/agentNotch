@@ -144,14 +144,17 @@ final class NotchController {
         let pending = !store.pendingApprovals.isEmpty
         panel.keyWhilePending = pending
         if pending {
-            collapseWork?.cancel()
-            collapseWork = nil
-            if !ui.expanded { expand() }
-            panel.makeKeyAndOrderFront(nil)
-            installKeyMonitor()
+            // Don't steal focus or force-expand — just let the resting notch bounce
+            // for attention. The user opens it (hover) to decide; keyboard shortcuts
+            // come online only once it's actually open.
+            panel.orderFrontRegardless()
+            if ui.expanded {
+                panel.makeKeyAndOrderFront(nil)
+                installKeyMonitor()
+            }
         } else {
-            panel.resignKey()
             removeKeyMonitor()
+            panel.resignKey()
         }
     }
 
@@ -208,8 +211,7 @@ final class NotchController {
 
     private func updateTracking() {
         let b = hover.bounds
-        let expanded = ui.expanded || !store.pendingApprovals.isEmpty
-        hover.activeRect = expanded ? b : CGRect(
+        hover.activeRect = ui.expanded ? b : CGRect(
             x: (b.width - metrics.collapsed.width) / 2,
             y: b.height - metrics.collapsed.height,
             width: metrics.collapsed.width, height: metrics.collapsed.height)
@@ -222,20 +224,28 @@ final class NotchController {
         guard !ui.expanded else { return }
         ui.expanded = true
         updateTracking()
+        // Opening while an approval is pending brings keyboard shortcuts online.
+        if panel.keyWhilePending {
+            panel.makeKeyAndOrderFront(nil)
+            installKeyMonitor()
+        }
     }
 
     private func scheduleCollapse() {
-        guard store.pendingApprovals.isEmpty else { return }
         collapseWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.collapse() }
         collapseWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
     private func collapse() {
-        guard ui.expanded, store.pendingApprovals.isEmpty else { return }
+        guard ui.expanded else { return }
         ui.selectedSessionID = nil
         ui.expanded = false
         updateTracking()
+        // Back to the resting notch: hand focus back and stop listening for shortcuts.
+        // If an approval is still pending, SwiftUI resumes the attention bounce.
+        removeKeyMonitor()
+        panel.resignKey()
     }
 }

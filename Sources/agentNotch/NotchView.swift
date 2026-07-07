@@ -109,8 +109,10 @@ struct NotchRootView: View {
     var onSwitchClaudeAccount: (String) -> Void = { _ in }
 
     var body: some View {
-        let exp = ui.expanded || store.currentApproval != nil
-        let bouncing = store.currentApproval != nil
+        // Expansion is hover-driven only. A pending approval no longer force-expands;
+        // instead the resting (collapsed) notch bounces for attention until opened.
+        let exp = ui.expanded
+        let shouldBounce = store.currentApproval != nil && !exp
         ZStack(alignment: .top) {
             BehindWindowBlur()
                 .opacity(exp ? 1 : 0)
@@ -130,21 +132,30 @@ struct NotchRootView: View {
                     onApprovalDecision: onApprovalDecision,
                     onSwitchClaudeAccount: onSwitchClaudeAccount)
                     .transition(.scale(scale: 0.9, anchor: .top).combined(with: .opacity))
+            } else if let approval = store.currentApproval {
+                CollapsedApproval(request: approval, notchWidth: m.notchWidth)
+                    .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
             } else {
                 CollapsedContent(store: store, notchWidth: m.notchWidth)
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
             }
         }
-        .offset(y: bouncing ? (ui.bouncing ? -4 : 0) : 0)
-        .animation(bouncing ? .easeInOut(duration: 0.35).repeatForever(autoreverses: true) : .default, value: ui.bouncing)
-        .onChange(of: store.currentApproval?.id) { _, new in
-            ui.bouncing = new != nil
-        }
         .frame(width: exp ? m.expanded.width : m.collapsed.width,
                height: exp ? m.expanded.height : m.collapsed.height)
         .clipShape(NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13))
-        .animation(.smooth(duration: 0.45), value: exp)
+        .animation(.snappy(duration: 0.28), value: exp)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Attention "bounce": the notch hugs the top screen edge, so it can't move up.
+        // Instead it swells downward/outward from the pinned top edge and pulses back.
+        // Uniform scale keeps the "APPROVE" text crisp (a y-only stretch distorts it).
+        // Only while resting with a pending approval; opening it (or deciding) settles.
+        .scaleEffect(ui.bouncing ? 1.16 : 1.0, anchor: .top)
+        .animation(shouldBounce
+                   ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true)
+                   : .snappy(duration: 0.24),
+                   value: ui.bouncing)
+        .onChange(of: shouldBounce) { _, bounce in ui.bouncing = bounce }
+        .onAppear { ui.bouncing = shouldBounce }
     }
 }
 
@@ -285,6 +296,45 @@ private struct CollapsedContent: View {
                 Circle().fill(.white.opacity(0.08)).frame(width: 24, height: 24)
             }
         }
+    }
+}
+
+// MARK: - Collapsed layout: pending-approval alert (replaces the gauges while waiting)
+
+private struct CollapsedApproval: View {
+    let request: ApprovalRequest
+    let notchWidth: CGFloat
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                productTile(request.product, size: 22)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(verbatim: request.toolName)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(verbatim: "needs approval")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: notchWidth)
+            HStack(spacing: 5) {
+                Text(verbatim: "APPROVE")
+                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(peach)
+                    .shadow(color: peach.opacity(0.6), radius: 5)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(peach)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -699,12 +749,14 @@ private struct SessionRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    HStack(spacing: 8) {
-                        Text(verbatim: "↑\(compactCount(session.inputTokens))")
-                        Text(verbatim: "↓\(compactCount(session.outputTokens))")
+                    if session.inputTokens + session.outputTokens > 0 {
+                        HStack(spacing: 8) {
+                            Text(verbatim: "↑\(compactCount(session.inputTokens))")
+                            Text(verbatim: "↓\(compactCount(session.outputTokens))")
+                        }
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.46))
                     }
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.46))
                 }
                 Spacer(minLength: 10)
                 TimelineView(.periodic(from: .now, by: 15)) { _ in
@@ -756,8 +808,10 @@ private struct SessionControl: View {
             }
 
             HStack(spacing: 10) {
-                MetricPill(label: "IN", value: compactCount(session.inputTokens))
-                MetricPill(label: "OUT", value: compactCount(session.outputTokens))
+                if session.inputTokens + session.outputTokens > 0 {
+                    MetricPill(label: "IN", value: compactCount(session.inputTokens))
+                    MetricPill(label: "OUT", value: compactCount(session.outputTokens))
+                }
                 TimelineView(.periodic(from: .now, by: 15)) { _ in
                     MetricPill(label: "AGE", value: shortAge(session.lastActivity))
                 }

@@ -108,36 +108,41 @@ final class LimitsTests: XCTestCase {
 
     // MARK: Cursor parsers
 
-    // Real payload shape: included-budget meter (spend/limit) drives the headline number.
-    func testCursorPeriodUsageUsesIncludedBudget() {
+    // Real payload shape: the dashboard's Auto/API meters are percentages used of the
+    // included budget. We surface both as remaining-%, and totalSpend > limit (bonus
+    // usage) must NOT collapse them to "0% left".
+    func testCursorPeriodUsageSplitsAutoAndApi() {
         let json = Data("""
         {"billingCycleEnd":"1786116841000",
-         "planUsage":{"totalSpend":1529,"remaining":471,"limit":2000,"totalPercentUsed":16.98}}
+         "planUsage":{"totalSpend":2479,"includedSpend":2000,"limit":2000,
+                      "autoPercentUsed":7.066666,"apiPercentUsed":48.022222,"totalPercentUsed":27.544}}
         """.utf8)
         let w = CursorLimits.windows(fromPeriodUsage: json)
-        XCTAssertEqual(w.map(\.name), ["PLAN"])
-        XCTAssertEqual(w[0].percent, 23.55, accuracy: 0.01, "471/2000 remaining, not totalPercentUsed")
+        XCTAssertEqual(w.map(\.name), ["API", "AUTO"])
+        XCTAssertEqual(w[0].percent, 51.98, accuracy: 0.01, "100 - apiPercentUsed")
+        XCTAssertEqual(w[1].percent, 92.93, accuracy: 0.01, "100 - autoPercentUsed")
         XCTAssertEqual(w[0].resetsAt, Date(timeIntervalSince1970: 1_786_116_841))
     }
 
-    func testCursorPeriodUsageDerivesRemainingFromSpendWhenAbsent() {
-        let json = Data(#"{"planUsage":{"totalSpend":500,"limit":2000}}"#.utf8)
-        let w = CursorLimits.windows(fromPeriodUsage: json)
-        XCTAssertEqual(w[0].percent, 75, "remaining = (limit - totalSpend)/limit")
-    }
-
-    func testCursorPeriodUsageFallsBackToPercentWhenNoLimit() {
+    func testCursorPeriodUsageFallsBackToTotalPercentWhenNoSplit() {
         let json = Data(#"{"planUsage":{"totalPercentUsed":40}}"#.utf8)
         let w = CursorLimits.windows(fromPeriodUsage: json)
         XCTAssertEqual(w.map(\.name), ["PLAN"])
         XCTAssertEqual(w[0].percent, 60)
     }
 
+    func testCursorPeriodUsageFallsBackToSpendLimit() {
+        let json = Data(#"{"planUsage":{"totalSpend":500,"limit":2000}}"#.utf8)
+        let w = CursorLimits.windows(fromPeriodUsage: json)
+        XCTAssertEqual(w.map(\.name), ["PLAN"])
+        XCTAssertEqual(w[0].percent, 75, "remaining = (limit - totalSpend)/limit")
+    }
+
     func testCursorPeriodUsageEmptyAndClamped() {
         XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: Data("{}".utf8)), [])
         XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: Data("not json".utf8)), [])
-        let over = Data(#"{"planUsage":{"remaining":-50,"limit":2000}}"#.utf8)
-        XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: over)[0].percent, 0,
+        let maxed = Data(#"{"planUsage":{"apiPercentUsed":140}}"#.utf8)
+        XCTAssertEqual(CursorLimits.windows(fromPeriodUsage: maxed)[0].percent, 0,
                        "remaining must clamp to 0, never negative")
     }
 

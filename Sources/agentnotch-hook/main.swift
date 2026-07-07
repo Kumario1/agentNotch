@@ -3,6 +3,13 @@ import Foundation
 private let socketPath = NSString(string: "~/.agentnotch/approvals.sock").expandingTildeInPath
 
 // Hook helper: stdin JSON → Unix socket → stdout decision JSON. Fail-open on errors.
+//
+// Two jobs, in order:
+//   1. Figure out which product fired the hook (Claude vs Cursor) from the payload
+//      shape, so the notch never mislabels a Cursor prompt as "Claude Code".
+//   2. Only bother the user for actions that actually need permission. Read-only
+//      tools (and anything the agent already auto-runs) pass straight through
+//      without touching the app — no socket round trip, no notch prompt.
 @main
 struct AgentNotchHook {
     static func main() {
@@ -12,33 +19,18 @@ struct AgentNotchHook {
         var payload = (try? JSONSerialization.jsonObject(with: stdin) as? [String: Any]) ?? [:]
         payload["id"] = payload["id"] as? String ?? UUID().uuidString
 
-        if payload["product"] == nil {
-            if payload["hook_event_name"] as? String == "PreToolUse"
-                || payload["tool_name"] != nil {
-                payload["product"] = "claude"
-            } else if payload["command"] != nil {
-                payload["product"] = "cursor"
-            }
-        }
-        if payload["toolName"] == nil {
-            payload["toolName"] = payload["tool_name"] as? String
-                ?? (payload["command"] != nil ? "Shell" : "tool")
-        }
-        if payload["summary"] == nil {
-            if let cmd = payload["command"] as? String {
-                payload["summary"] = cmd
-            } else if let input = payload["tool_input"] as? [String: Any],
-                      let cmd = input["command"] as? String {
-                payload["summary"] = cmd
-            } else if let name = payload["tool_name"] as? String {
-                payload["summary"] = name
-            }
-        }
+        let product = detectProduct(payload)
+        payload["product"] = product
 
-        // The product is known from the request we send; the server's response only
-        // needs to carry the decision. Deriving the product from the response is wrong
-        // (the server doesn't echo it) and would format every reply as Claude.
-        let product = payload["product"] as? String ?? "claude"
+        let tool = toolName(payload)
+        payload["toolName"] = tool
+        payload["summary"] = summary(payload) ?? tool
+
+        // Skip the prompt entirely for low-risk tools; let the action run.
+        guard needsApproval(product: product, tool: tool, payload: payload) else {
+            failOpen(product: product)
+            return
+        }
 
         guard let reqData = try? JSONSerialization.data(withJSONObject: payload) else {
             failOpen(product: product)
@@ -53,6 +45,71 @@ struct AgentNotchHook {
         FileHandle.standardOutput.write(resp)
         if resp.last != 0x0A { FileHandle.standardOutput.write(Data([0x0A])) }
     }
+
+    // MARK: - Payload interpretation
+
+    // Cursor's common hook schema always carries fields Claude never sends
+    // (cursor_version / conversation_id / generation_id / workspace_roots), and
+    // its event names are lowerCamelCase. Claude's PreToolUse is exact-cased and
+    // carries session_id. Check the unambiguous Cursor markers first.
+    private static func detectProduct(_ p: [String: Any]) -> String {
+        if let explicit = p["product"] as? String, !explicit.isEmpty { return explicit }
+        if p["cursor_version"] != nil || p["conversation_id"] != nil
+            || p["generation_id"] != nil || p["workspace_roots"] != nil {
+            return "cursor"
+        }
+        if p["hook_event_name"] as? String == "PreToolUse"
+            || p["session_id"] != nil || p["transcript_path"] != nil {
+            return "claude"
+        }
+        // beforeShellExecution sends a bare command with no tool_name.
+        if p["command"] != nil, p["tool_name"] == nil { return "cursor" }
+        if p["tool_name"] != nil { return "claude" }
+        return "claude"
+    }
+
+    private static func toolName(_ p: [String: Any]) -> String {
+        if let t = p["toolName"] as? String, !t.isEmpty { return t }
+        if let t = p["tool_name"] as? String, !t.isEmpty { return t }
+        if p["command"] != nil { return "Shell" }
+        return "tool"
+    }
+
+    private static func summary(_ p: [String: Any]) -> String? {
+        if let s = p["summary"] as? String { return s }
+        if let cmd = p["command"] as? String { return cmd }
+        if let input = p["tool_input"] as? [String: Any] {
+            if let cmd = input["command"] as? String { return cmd }
+            if let file = input["file_path"] as? String { return file }
+        }
+        return p["tool_name"] as? String
+    }
+
+    // Read-only / low-risk tools run without a prompt. Anything that mutates state,
+    // runs a command, hits an MCP server, or is unrecognized needs an approval —
+    // unknown tools default to "ask" so a new capability is never silently allowed.
+    private static let safeClaudeTools: Set<String> = [
+        "read", "glob", "grep", "ls", "todowrite", "todoread", "notebookread",
+        "webfetch", "websearch", "task", "bashoutput", "killbash", "killshell",
+    ]
+
+    private static func needsApproval(product: String, tool: String, payload: [String: Any]) -> Bool {
+        switch product {
+        case "cursor":
+            // Cursor auto-runs safe commands inside its own sandbox and only asks the
+            // user when a command must run with full access (`sandbox` == false).
+            // Mirror that exactly: stay silent for sandboxed commands, prompt only for
+            // the ones Cursor itself would stop and ask about.
+            if let sandboxed = payload["sandbox"] as? Bool { return !sandboxed }
+            return true
+        case "claude":
+            return !safeClaudeTools.contains(tool.lowercased())
+        default:
+            return true
+        }
+    }
+
+    // MARK: - Socket round trip
 
     private static func roundTrip(_ request: Data, product: String) -> Data? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -90,12 +147,8 @@ struct AgentNotchHook {
         guard !buf.isEmpty else { return nil }
 
         guard let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return buf }
-        let decision = payloadString(obj, key: "decision") ?? "allow"
+        let decision = obj["decision"] as? String ?? "allow"
         return formatOutput(product: product, decision: decision)
-    }
-
-    private static func payloadString(_ obj: [String: Any], key: String) -> String? {
-        obj[key] as? String
     }
 
     private static func formatOutput(product: String, decision: String) -> Data? {

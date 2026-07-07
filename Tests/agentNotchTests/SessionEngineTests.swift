@@ -73,6 +73,19 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertTrue(s.isActive)
     }
 
+    func testCursorTurnEndedMarksSessionInactive() {
+        var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"role":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#.utf8), product: .cursor, to: &s)
+        XCTAssertTrue(s.isActive)
+
+        SessionParsing.apply(Data(#"{"type":"turn_ended","status":"success"}"#.utf8), product: .cursor, to: &s)
+        XCTAssertFalse(s.isActive, "turn_ended must retire the session so only working ones stay listed")
+
+        // A fresh user turn revives it.
+        SessionParsing.apply(Data(#"{"role":"user","message":{"content":[{"type":"text","text":"again"}]}}"#.utf8), product: .cursor, to: &s)
+        XCTAssertTrue(s.isActive)
+    }
+
     // Real Cursor transcripts use type "tool_use" with an absolute `input.path` and carry
     // no cwd; the parser must recover the project cwd/title from the slugged transcript path.
     func testCursorRealFormatRecoversCwdAndTitle() {
