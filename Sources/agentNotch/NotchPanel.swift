@@ -49,6 +49,13 @@ final class NotchController {
     private var metrics = NotchMetrics(notchWidth: 0, collapsed: .zero, expanded: .zero)
     private var panelRect: CGRect = .zero
     private var collapseWork: DispatchWorkItem?
+    private var accountCount = 1
+
+    func setAccountCount(_ n: Int) {
+        guard n != accountCount, n > 0 else { return }
+        accountCount = n
+        reposition()
+    }
 
     init() {
         computeRects()
@@ -92,7 +99,9 @@ final class NotchController {
 
         // Black border extends 130pt into each wing and 10pt below the notch.
         let collapsed = CGSize(width: notch.width + 260, height: max(notch.height, 24) + 10)
-        let expanded = CGSize(width: max(540, collapsed.width + 140), height: 210)
+        // Height grows with account rows: chrome (~120) + ~110 per account card.
+        let height = max(210, CGFloat(120 + 110 * max(accountCount, 1)))
+        let expanded = CGSize(width: max(540, collapsed.width + 140), height: height)
         metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed, expanded: expanded)
         panelRect = CGRect(x: notch.midX - expanded.width / 2, y: notch.maxY - expanded.height,
                            width: expanded.width, height: expanded.height)
