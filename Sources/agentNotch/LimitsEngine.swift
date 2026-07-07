@@ -5,6 +5,7 @@ import Foundation
 final class LimitsEngine {
     private var claudeProviders: [ClaudeAccountProvider] = []
     private var codexProviders: [CodexAccountProvider] = []
+    private var cursorProviders: [CursorAccountProvider] = []
     private var accounts: [String: AccountUsage] = [:]
     private let mergeQueue = DispatchQueue(label: "agentNotch.limits")
     private let onPublish: ([AccountUsage]) -> Void
@@ -16,11 +17,13 @@ final class LimitsEngine {
         }
         claudeProviders = config.claudeDirs.map { ClaudeAccountProvider(dir: $0, onUpdate: update) }
         codexProviders = config.codexDirs.map { CodexAccountProvider(dir: $0, onUpdate: update) }
+        cursorProviders = config.cursorDirs.map { CursorAccountProvider(dir: $0, onUpdate: update) }
     }
 
     func start() {
         claudeProviders.forEach { $0.start() }
         codexProviders.forEach { $0.start() }
+        cursorProviders.forEach { $0.start() }
     }
 
     private func merge(_ acc: AccountUsage) {

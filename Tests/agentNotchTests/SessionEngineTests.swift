@@ -33,5 +33,43 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(s.detail, "Running exec_command")
         XCTAssertEqual(s.inputTokens, 2_500_000)
         XCTAssertEqual(s.outputTokens, 16_000)
+        XCTAssertTrue(s.isActive)
+    }
+
+    func testCodexTaskCompleteMarksSessionInactive() {
+        var s = SessionParsing.empty(path: "/tmp/rollout.jsonl", product: .codex, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:00.000Z","payload":{"type":"task_started"}}"#.utf8), product: .codex, to: &s)
+        XCTAssertTrue(s.isActive)
+
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:01:00.000Z","payload":{"type":"task_complete"}}"#.utf8), product: .codex, to: &s)
+        XCTAssertFalse(s.isActive)
+
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:02:00.000Z","payload":{"type":"task_started"}}"#.utf8), product: .codex, to: &s)
+        XCTAssertTrue(s.isActive)
+    }
+
+    func testClaudeStopMarkersMarkSessionInactive() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data("""
+        {"type":"user","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"user","content":"hi"}}
+        """.utf8), product: .claude, to: &s)
+        XCTAssertTrue(s.isActive)
+
+        SessionParsing.apply(Data(#"{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-07-07T10:01:00.000Z"}"#.utf8), product: .claude, to: &s)
+        XCTAssertFalse(s.isActive)
+    }
+
+    func testCursorSessionParsing() {
+        var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
+        SessionParsing.apply(Data("""
+        {"role":"user","message":{"content":[{"type":"text","text":"fix the login bug"}]}}
+        """.utf8), product: .cursor, to: &s)
+        SessionParsing.apply(Data("""
+        {"role":"assistant","message":{"content":[{"type":"tool_call","name":"Shell","toolName":"Shell"}]}}
+        """.utf8), product: .cursor, to: &s)
+
+        XCTAssertEqual(s.title, "foo")
+        XCTAssertEqual(s.detail, "Running Shell")
+        XCTAssertTrue(s.isActive)
     }
 }

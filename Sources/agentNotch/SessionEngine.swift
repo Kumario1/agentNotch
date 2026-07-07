@@ -1,6 +1,6 @@
 import Foundation
 
-// ponytail: "current" is recent mtime; replace with PID/socket liveness when hooks exist.
+// ponytail: "current" narrows files to parse; transcript terminal events decide live rows.
 private let currentSessionAge: TimeInterval = 4 * 3600
 
 enum SessionParsing {
@@ -29,10 +29,13 @@ enum SessionParsing {
             s.sessionID = sid
         }
 
-        if product == .claude {
+        switch product {
+        case .claude:
             applyClaude(obj, message: message, to: &s)
-        } else {
+        case .codex:
             applyCodex(payload, to: &s)
+        case .cursor:
+            applyCursor(obj, message: message, to: &s)
         }
     }
 
@@ -45,7 +48,13 @@ enum SessionParsing {
         }
 
         guard let type = obj["type"] as? String else { return }
+        if type == "last-prompt" || isClaudeStop(obj) {
+            s.isActive = false
+            return
+        }
+        if type == "user" { s.isActive = true }
         if type == "queue-operation", let op = obj["operation"] as? String {
+            s.isActive = true
             s.detail = op == "enqueue" ? "Queued" : op.capitalized
             return
         }
@@ -55,12 +64,15 @@ enum SessionParsing {
         }
         let role = message["role"] as? String ?? type
         if role == "assistant" {
+            s.isActive = true
             if let tool = toolName(message["content"]) {
                 s.detail = "Running \(tool)"
             } else if text(message["content"]) != nil {
                 s.detail = "Replying"
             }
+            if message["stop_reason"] as? String == "end_turn" { s.isActive = false }
         } else if let t = text(message["content"]) {
+            s.isActive = true
             s.detail = t
         }
     }
@@ -74,31 +86,85 @@ enum SessionParsing {
         guard let type = payload["type"] as? String else { return }
         switch type {
         case "function_call", "custom_tool_call":
+            s.isActive = true
             s.detail = "Running \((payload["name"] as? String) ?? "tool")"
         case "function_call_output", "custom_tool_call_output":
+            s.isActive = true
             s.detail = "Reading output"
         case "agent_message":
+            s.isActive = true
             s.detail = "Replying"
         case "reasoning":
+            s.isActive = true
             s.detail = "Thinking"
         case "task_started":
+            s.isActive = true
             s.detail = "Working"
         case "task_complete":
+            s.isActive = false
             s.detail = "Done"
         case "turn_aborted":
+            s.isActive = false
             s.detail = "Stopped"
         case "patch_apply_end":
+            s.isActive = true
             s.detail = "Applying patch"
         case "message", "user_message":
+            s.isActive = true
             if let t = text(payload["content"]) ?? clean(payload["message"] as? String) { s.detail = t }
         default:
             break
         }
     }
 
+    private static func applyCursor(_ obj: [String: Any], message: [String: Any]?, to s: inout AgentSession) {
+        let role = obj["role"] as? String ?? message?["role"] as? String
+        guard let role else { return }
+
+        if role == "assistant" {
+            s.isActive = true
+            if let tool = toolName(message?["content"]) {
+                s.detail = "Running \(tool)"
+            } else if let t = text(message?["content"]) {
+                s.detail = String(t.prefix(80))
+            } else {
+                s.detail = "Replying"
+            }
+        } else if role == "user" {
+            s.isActive = true
+            if let t = text(message?["content"]) {
+                s.detail = String(t.prefix(80))
+            }
+        } else if role == "tool" {
+            s.isActive = true
+            s.detail = "Tool output"
+        }
+
+        if let usage = message?["usage"] as? [String: Any] {
+            s.inputTokens += int(usage["input_tokens"] ?? usage["prompt_tokens"])
+            s.outputTokens += int(usage["output_tokens"] ?? usage["completion_tokens"])
+        }
+    }
+
+    private static func isClaudeStop(_ obj: [String: Any]) -> Bool {
+        if let subtype = obj["subtype"] as? String,
+           subtype == "stop_hook_summary" || subtype == "turn_duration" {
+            return true
+        }
+        let hook = (obj["attachment"] as? [String: Any])?["hookName"] as? String
+        return hook == "Stop"
+    }
+
     private static func title(from cwd: String?, fallbackPath: String) -> String {
         if let cwd, !cwd.isEmpty {
             let name = URL(fileURLWithPath: cwd).lastPathComponent
+            if !name.isEmpty { return name }
+        }
+        // Cursor paths: .../projects/Users-foo-bar/agent-transcripts/uuid/uuid.jsonl
+        let parts = fallbackPath.split(separator: "/")
+        if let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count {
+            let slug = String(parts[idx + 1])
+            let name = slug.split(separator: "-").last.map(String.init) ?? slug
             if !name.isEmpty { return name }
         }
         let parent = URL(fileURLWithPath: fallbackPath).deletingLastPathComponent().lastPathComponent
@@ -107,7 +173,13 @@ enum SessionParsing {
 
     private static func toolName(_ content: Any?) -> String? {
         guard let parts = content as? [[String: Any]] else { return nil }
-        return parts.first { $0["type"] as? String == "tool_use" }?["name"] as? String
+        for p in parts {
+            let type = p["type"] as? String
+            if type == "tool_use" || type == "tool_call" {
+                return p["name"] as? String ?? p["toolName"] as? String
+            }
+        }
+        return nil
     }
 
     private static func text(_ content: Any?) -> String? {
@@ -166,7 +238,9 @@ final class SessionEngine {
                 let files = (try? FileManager.default.contentsOfDirectory(
                     at: p, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
                 for f in files where f.pathExtension == "jsonl" {
-                    if isCurrent(f, cutoff: cutoff) { live.insert(f.path); ingest(f, product: .claude) }
+                    if isCurrent(f, cutoff: cutoff), ingest(f, product: .claude)?.isActive == true {
+                        live.insert(f.path)
+                    }
                 }
             }
         }
@@ -176,11 +250,24 @@ final class SessionEngine {
             guard let en = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
             for case let f as URL in en where f.pathExtension == "jsonl" {
-                if isCurrent(f, cutoff: cutoff) { live.insert(f.path); ingest(f, product: .codex) }
+                if isCurrent(f, cutoff: cutoff), ingest(f, product: .codex)?.isActive == true {
+                    live.insert(f.path)
+                }
             }
         }
 
-        sessions = sessions.filter { live.contains($0.key) && $0.value.lastActivity >= cutoff }
+        for dir in config.cursorDirs {
+            let root = dir.appendingPathComponent("projects", isDirectory: true)
+            guard let en = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+            for case let f as URL in en where f.path.contains("agent-transcripts") && f.pathExtension == "jsonl" {
+                if isCurrent(f, cutoff: cutoff), ingest(f, product: .cursor)?.isActive == true {
+                    live.insert(f.path)
+                }
+            }
+        }
+
+        sessions = sessions.filter { live.contains($0.key) && $0.value.lastActivity >= cutoff && $0.value.isActive }
         let sorted = sessions.values.sorted { $0.lastActivity > $1.lastActivity }
         DispatchQueue.main.async { [store] in
             if store.sessions != sorted { store.sessions = sorted }
@@ -192,9 +279,9 @@ final class SessionEngine {
         return (m ?? .distantPast) >= cutoff
     }
 
-    private func ingest(_ url: URL, product: Product) {
+    private func ingest(_ url: URL, product: Product) -> AgentSession? {
         let path = url.path
-        guard let fh = FileHandle(forReadingAtPath: path) else { return }
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? fh.close() }
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
         var session = sessions[path] ?? SessionParsing.empty(path: path, product: product, modifiedAt: modified)
@@ -214,5 +301,6 @@ final class SessionEngine {
         partials[path] = buf
         offsets[path] = offset
         sessions[path] = session
+        return session
     }
 }

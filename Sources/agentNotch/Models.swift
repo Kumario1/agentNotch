@@ -26,8 +26,24 @@ struct AgentSession: Equatable, Identifiable {
     var inputTokens = 0
     var outputTokens = 0
     var lastActivity: Date
+    var isActive = false
     var cwd: String? = nil
     var transcriptPath: String
+}
+
+enum ApprovalDecision: String, Equatable, Codable {
+    case allow, deny, always
+}
+
+struct ApprovalRequest: Equatable, Identifiable {
+    let id: String
+    let product: Product
+    let sessionTitle: String
+    let toolName: String
+    let summary: String
+    let cwd: String?
+    let receivedAt: Date
+    let alwaysKey: String
 }
 
 // One observable holder shared by the SwiftUI hierarchies. Unchanged subtrees don't re-render.
@@ -35,6 +51,8 @@ struct AgentSession: Equatable, Identifiable {
     var snapshot = UsageSnapshot()
     var accounts: [AccountUsage] = []
     var sessions: [AgentSession] = []
+    var pendingApprovals: [ApprovalRequest] = []
+    var activeClaudeAccountID: String? = nil
 }
 
 // Minimal decodable matching Claude Code assistant transcript lines. Unknown fields ignored.
@@ -54,7 +72,9 @@ struct TranscriptLine: Decodable {
 
 // MARK: - Real-limit models (per-account, per-window)
 
-enum Product: String, Equatable { case claude, codex }
+enum Product: String, Equatable, Codable, CaseIterable {
+    case claude, codex, cursor
+}
 
 struct LimitWindow: Equatable {
     let name: String        // "5H", "7D", "OPUS", "WEEK"
@@ -86,23 +106,52 @@ func parseISO8601(_ s: String) -> Date? { isoFrac.date(from: s) ?? isoPlain.date
 struct AppConfig: Equatable {
     var claudeDirs: [URL]
     var codexDirs: [URL]
+    var cursorDirs: [URL]
+    var approvalsEnabledClaude: Bool
+    var approvalsEnabledCursor: Bool
+    var launchAtLogin: Bool
+
+    static let configPath: String = NSString(string: "~/.agentnotch.json").expandingTildeInPath
 
     static func parse(_ data: Data?) -> AppConfig {
-        var claude = ["~/.claude"], codex = ["~/.codex"]
+        var claude = ["~/.claude"], codex = ["~/.codex"], cursor = ["~/.cursor"]
+        var approvalsClaude = false, approvalsCursor = false, launchAtLogin = false
         if let data,
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String]] {
-            claude = obj["claude"] ?? claude
-            codex = obj["codex"] ?? codex
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            claude = obj["claude"] as? [String] ?? claude
+            codex = obj["codex"] as? [String] ?? codex
+            cursor = obj["cursor"] as? [String] ?? cursor
+            approvalsClaude = obj["approvalsEnabledClaude"] as? Bool ?? approvalsClaude
+            approvalsCursor = obj["approvalsEnabledCursor"] as? Bool ?? approvalsCursor
+            launchAtLogin = obj["launchAtLogin"] as? Bool ?? launchAtLogin
         }
         func urls(_ paths: [String]) -> [URL] {
             paths.map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath, isDirectory: true) }
         }
-        return AppConfig(claudeDirs: urls(claude), codexDirs: urls(codex))
+        return AppConfig(
+            claudeDirs: urls(claude),
+            codexDirs: urls(codex),
+            cursorDirs: urls(cursor),
+            approvalsEnabledClaude: approvalsClaude,
+            approvalsEnabledCursor: approvalsCursor,
+            launchAtLogin: launchAtLogin)
     }
 
     static func load() -> AppConfig {
-        let path = NSString(string: "~/.agentnotch.json").expandingTildeInPath
-        return parse(FileManager.default.contents(atPath: path))
+        parse(FileManager.default.contents(atPath: configPath))
+    }
+
+    func save() {
+        let obj: [String: Any] = [
+            "claude": claudeDirs.map(\.path),
+            "codex": codexDirs.map(\.path),
+            "cursor": cursorDirs.map(\.path),
+            "approvalsEnabledClaude": approvalsEnabledClaude,
+            "approvalsEnabledCursor": approvalsEnabledCursor,
+            "launchAtLogin": launchAtLogin,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: URL(fileURLWithPath: Self.configPath), options: .atomic)
     }
 }
 
@@ -116,4 +165,11 @@ extension UsageStore {
         accounts.filter { $0.product == p && $0.status == nil }
             .max { $0.activityStamp < $1.activityStamp }
     }
+
+    // Two most-recently-active accounts across all products (for collapsed wings).
+    func topActiveAccounts(limit: Int = 2) -> [AccountUsage] {
+        Array(accounts.sorted { $0.activityStamp > $1.activityStamp }.prefix(limit))
+    }
+
+    var currentApproval: ApprovalRequest? { pendingApprovals.first }
 }

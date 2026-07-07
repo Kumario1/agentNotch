@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(name: "agentNotch"),
+        .executableTarget(name: "agentnotch-hook"),
         .testTarget(name: "agentNotchTests", dependencies: ["agentNotch"]),
     ]
 )

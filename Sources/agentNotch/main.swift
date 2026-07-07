@@ -25,11 +25,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: UsageEngine!
     private var limits: LimitsEngine!
     private var sessions: SessionEngine!
+    private var settings: SettingsController!
+    private var config = AppConfig.load()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        controller = NotchController()
-        let config = AppConfig.load()
-        engine = UsageEngine(store: controller.store)   // still feeds last-project footer
+        config = AppConfig.load()
+        settings = SettingsController(config: config) { [weak self] updated in
+            self?.config = updated
+        }
+        controller = NotchController(settings: settings, claudeDirs: config.claudeDirs)
+        controller.start()
+        HookInstaller.sync(config: config)
+
+        engine = UsageEngine(store: controller.store)
         engine.start()
         sessions = SessionEngine(config: config, store: controller.store)
         sessions.start()
@@ -51,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 let app = NSApplication.shared
 terminateOtherInstances()
-app.setActivationPolicy(.accessory) // no Dock icon, no menu bar
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
