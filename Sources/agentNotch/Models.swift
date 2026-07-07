@@ -91,3 +91,16 @@ struct AppConfig: Equatable {
         return parse(FileManager.default.contents(atPath: path))
     }
 }
+
+extension AccountUsage {
+    var maxPercent: Double? { windows.map(\.percent).max() }
+    var activityStamp: Date { lastActivity ?? asOf ?? .distantPast }
+}
+
+extension UsageStore {
+    // Collapsed pill shows the most-recently-active healthy account per product.
+    func activeAccount(_ p: Product) -> AccountUsage? {
+        accounts.filter { $0.product == p && $0.status == nil }
+            .max { $0.activityStamp < $1.activityStamp }
+    }
+}

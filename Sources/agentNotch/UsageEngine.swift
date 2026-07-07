@@ -1,10 +1,5 @@
 import Foundation
 
-// ponytail: Anthropic publishes no token caps. These are rough Max-plan estimates and are meant
-// to be user-tunable — display is % of cap + absolute tokens, so a wrong cap still reads useful.
-let fiveHourCap = 88_000
-let sevenDayCap = 2_200_000
-
 private let fiveHours: TimeInterval = 5 * 3600
 private let sevenDays: TimeInterval = 7 * 24 * 3600
 

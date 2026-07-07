@@ -147,6 +147,32 @@ private struct ClaudeTile: View {
     }
 }
 
+// Rounded-square Codex mark, same tile language as ClaudeTile.
+private struct CodexTile: View {
+    var size: CGFloat = 26
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+            .fill(Color(white: 0.13))
+            .overlay(
+                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1)
+            )
+            .overlay(
+                Image(systemName: "terminal")
+                    .font(.system(size: size * 0.42, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+            )
+            .frame(width: size, height: size)
+    }
+}
+
+@ViewBuilder private func productTile(_ p: Product, size: CGFloat) -> some View {
+    switch p {
+    case .claude: ClaudeTile(size: size)
+    case .codex: CodexTile(size: size)
+    }
+}
+
 // Radial ring gauge: dark coin, peach arc, percentage in the middle.
 private struct RingGauge: View {
     let fraction: Double
@@ -175,98 +201,52 @@ private struct RingGauge: View {
     }
 }
 
-private struct ResetTimer: View {
-    let reset: Date?
-    var body: some View {
-        if let reset, reset > .now {
-            Text(timerInterval: Date.now...reset, countsDown: true)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .monospacedDigit()
-                .foregroundStyle(.white.opacity(0.9))
-        } else {
-            Text("—")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-    }
-}
-
-private func fraction(_ tokens: Int, _ cap: Int) -> Double {
-    min(max(Double(tokens) / Double(cap), 0), 1)
-}
-
-// MARK: - Collapsed layout: logo tile + radial rings in the wings
+// MARK: - Collapsed layout: per-product tile + ring in each wing
 
 private struct CollapsedContent: View {
     var store: UsageStore
     let notchWidth: CGFloat
 
     var body: some View {
-        let s = store.snapshot
         HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                ClaudeTile(size: 24)
-                RingGauge(fraction: fraction(s.fiveHourTokens, fiveHourCap))
-                RingGauge(fraction: fraction(s.sevenDayTokens, sevenDayCap))
-            }
-            .frame(maxWidth: .infinity)
+            wing(.claude).frame(maxWidth: .infinity)
             Color.clear.frame(width: notchWidth) // the physical notch sits here
-            VStack(alignment: .center, spacing: 2) {
-                Text("RESETS")
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .tracking(1)
-                    .foregroundStyle(.white.opacity(0.4))
-                ResetTimer(reset: s.nextReset)
-            }
-            .frame(maxWidth: .infinity)
+            wing(.codex).frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    @ViewBuilder private func wing(_ p: Product) -> some View {
+        HStack(spacing: 8) {
+            productTile(p, size: 24)
+            if let a = store.activeAccount(p), let pct = a.maxPercent {
+                RingGauge(fraction: min(max(pct / 100, 0), 1))
+            } else {
+                RingGauge(fraction: 0).opacity(0.3)
+            }
+        }
+    }
 }
 
-// MARK: - Expanded layout: translucent session card
+// MARK: - Expanded layout: one card per account
 
 private struct ExpandedContent: View {
     var store: UsageStore
 
     var body: some View {
         let s = store.snapshot
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("CLAUDE CODE")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(2)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("AGENT LIMITS")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(2)
+                .foregroundStyle(.white.opacity(0.45))
+            if store.accounts.isEmpty {
+                Text("waiting for account data…")
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.45))
-                Spacer()
-                Text("RESETS")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(1)
-                    .foregroundStyle(.white.opacity(0.4))
-                ResetTimer(reset: s.nextReset)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    ClaudeTile(size: 30)
-                    Text("Claude Code")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                    if let p = s.lastProject {
-                        Text("/ \(p)")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.45))
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                BarRow(label: "5H", tokens: s.fiveHourTokens, cap: fiveHourCap)
-                BarRow(label: "7D", tokens: s.sevenDayTokens, cap: sevenDayCap)
-            }
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(.white.opacity(0.07))
-            )
+            ForEach(store.accounts) { AccountRow(account: $0) }
             HStack {
                 Text(s.lastProject ?? "no activity yet")
                     .font(.system(size: 11, design: .monospaced))
@@ -287,18 +267,52 @@ private struct ExpandedContent: View {
     }
 }
 
-private struct BarRow: View {
-    let label: String
-    let tokens: Int
-    let cap: Int
+private struct AccountRow: View {
+    let account: AccountUsage
 
     var body: some View {
-        let f = fraction(tokens, cap)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                productTile(account.product, size: 26)
+                Text(account.label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                if let asOf = account.asOf, Date().timeIntervalSince(asOf) > 300 {
+                    (Text("as of ") + Text(asOf, style: .relative) + Text(" ago"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            if let status = account.status {
+                Text(status)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(dangerRed.opacity(0.9))
+            } else {
+                ForEach(account.windows, id: \.name) { w in
+                    WindowBarRow(window: w)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.white.opacity(0.07))
+        )
+    }
+}
+
+private struct WindowBarRow: View {
+    let window: LimitWindow
+
+    var body: some View {
+        let f = min(max(window.percent / 100, 0), 1)
         HStack(spacing: 10) {
-            Text(label)
+            Text(window.name)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.45))
-                .frame(width: 18, alignment: .leading)
+                .frame(width: 36, alignment: .leading)
             Capsule().fill(.white.opacity(0.15))
                 .overlay(alignment: .leading) {
                     GeometryReader { g in
@@ -307,12 +321,24 @@ private struct BarRow: View {
                     }
                 }
                 .frame(height: 6)
-            Text("\(Int(f * 100))%")
-                .font(.system(size: 13, weight: .semibold))
+            Text("\(Int(window.percent.rounded()))%")
+                .font(.system(size: 13, weight: .bold))
                 .monospacedDigit()
                 .contentTransition(.numericText())
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(.white)
                 .frame(width: 40, alignment: .trailing)
+            if let r = window.resetsAt, r > .now {
+                Text(timerInterval: Date.now...r, countsDown: true)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 62, alignment: .trailing)
+            } else {
+                Text("—")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .frame(width: 62, alignment: .trailing)
+            }
         }
     }
 }
