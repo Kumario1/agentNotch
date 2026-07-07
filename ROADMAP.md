@@ -89,3 +89,11 @@ This is where AgentPeek was janky. Nail this before any data exists.
 
 ## Later (explicitly deferred)
 Permission prompts via PreToolUse hook + Unix socket · dev-server port watcher · per-session status list · launch-at-login · Codex support.
+
+## Step 5 — Real limits, multi-account (done)
+
+Real per-account limit data replaces cap estimation: Claude via the OAuth usage
+endpoint (per config dir in `~/.agentnotch.json`, default `~/.claude`), Codex via
+`rate_limits` snapshots in `~/.codex/sessions` rollouts. One card per account in
+the expanded panel; collapsed wings show the most-recently-active account per
+product. Spec: `docs/superpowers/specs/2026-07-07-real-limits-multi-account-design.md`.
