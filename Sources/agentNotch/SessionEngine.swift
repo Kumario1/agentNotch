@@ -406,14 +406,24 @@ final class SessionEngine {
             }
         }
 
-        // A session stays listed until its terminal actually closes, not just while
-        // it's mid-turn. Probe process liveness only when something is idle and could
-        // be kept alive — no ps/lsof when everything's already active or there's nothing.
-        let needLiveness = sessions.values.contains { !$0.isActive && $0.cwd != nil }
-        let live = needLiveness ? SessionLiveness.liveKeys() : []
+        // A Claude session stays listed until its terminal actually closes, not just
+        // while it's mid-turn — matched by the `--session-id` in the live process's
+        // argv (so several sessions in one folder are told apart). nil = probe failed,
+        // then we keep the prior isAlive rather than flap. Probe only when a Claude
+        // session exists.
+        let liveIDs: Set<String>? = sessions.values.contains { $0.product == .claude }
+            ? SessionLiveness.liveClaudeSessionIDs() : []
         for path in Array(sessions.keys) {
             guard var s = sessions[path] else { continue }
-            s.isAlive = s.cwd.map { live.contains(SessionLiveness.key(product: s.product, cwd: $0)) } ?? false
+            if s.product == .claude {
+                if let liveIDs {
+                    let uuid = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+                    s.isAlive = liveIDs.contains(uuid) || (s.sessionID.map(liveIDs.contains) ?? false)
+                }
+                // liveIDs == nil (probe failed): leave s.isAlive untouched.
+            } else {
+                s.isAlive = false   // no per-session signal for Codex/Cursor
+            }
             // Prune only when idle-dead AND aged out: an open-but-idle terminal is never
             // dropped, while abandoned tail state can't grow without bound.
             if s.lastActivity < cutoff && !s.isAlive && !pinnedSnapshot.contains(path) {
@@ -431,11 +441,13 @@ final class SessionEngine {
         }
     }
 
-    // Shown rows: working (mid-turn) or terminal-alive, working ones first, newest
-    // first within each group. Pure so it's unit-testable without touching disk.
+    // Shown rows: a Claude row shows only while its terminal process is alive (so an
+    // exited session drops even if its transcript ended mid-turn); Codex/Cursor have
+    // no per-session liveness signal, so they show while working. Pinned always shows.
+    // Pinned first, then working, then newest. Pure so it's unit-testable.
     static func publishable<S: Sequence>(_ sessions: S, pinned: Set<String> = []) -> [AgentSession] where S.Element == AgentSession {
         sessions
-            .filter { $0.isActive || $0.isAlive || pinned.contains($0.id) }
+            .filter { pinned.contains($0.id) || ($0.product == .claude ? $0.isAlive : $0.isActive) }
             .sorted { lhs, rhs in
                 let lp = pinned.contains(lhs.id), rp = pinned.contains(rhs.id)
                 if lp != rp { return lp }                              // pinned first

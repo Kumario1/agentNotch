@@ -94,19 +94,30 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(s.detail, "Idle", "idle rows carry a clear cue while the terminal stays open")
     }
 
-    func testPublishableShowsWorkingAndAliveWorkingFirst() {
+    func testPublishableShowsOnlyLiveClaudeSessions() {
         func make(_ id: String, active: Bool, alive: Bool, at t: TimeInterval) -> AgentSession {
             var s = SessionParsing.empty(path: id, product: .claude, modifiedAt: Date(timeIntervalSince1970: t))
             s.isActive = active; s.isAlive = alive
             return s
         }
-        let working   = make("w", active: true,  alive: false, at: 100) // mid-turn
-        let idleAlive = make("a", active: false, alive: true,  at: 300) // idle, terminal still open
-        let deadIdle  = make("d", active: false, alive: false, at: 400) // terminal closed
+        let working = make("w", active: true,  alive: true,  at: 100) // mid-turn, process up
+        let idle    = make("a", active: false, alive: true,  at: 300) // idle, terminal still open
+        let exited  = make("x", active: true,  alive: false, at: 400) // exited: stale-active, process gone
+        let closed  = make("c", active: false, alive: false, at: 500) // idle + terminal closed
 
-        let out = SessionEngine.publishable([deadIdle, idleAlive, working])
+        let out = SessionEngine.publishable([exited, closed, idle, working])
         XCTAssertEqual(out.map(\.id), ["w", "a"],
-                       "working sorts above idle-alive; a closed terminal drops even though it's newest")
+                       "a Claude row shows only while its process is alive; exited rows drop even if newest")
+    }
+
+    func testPublishableCodexFallsBackToWorking() {
+        func make(_ id: String, active: Bool) -> AgentSession {
+            var s = SessionParsing.empty(path: id, product: .codex, modifiedAt: Date(timeIntervalSince1970: 1))
+            s.isActive = active
+            return s
+        }
+        let out = SessionEngine.publishable([make("on", active: true), make("off", active: false)])
+        XCTAssertEqual(out.map(\.id), ["on"], "Codex has no per-session liveness → show while working")
     }
 
     func testCursorSessionParsing() {

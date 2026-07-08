@@ -421,28 +421,28 @@ private struct ExpandedContent: View {
                     .padding(.bottom, 12)
             } else {
                 HStack(spacing: 8) {
-                    ProductFilterChip(symbol: "*", title: "all", selected: ui.selectedProduct == nil) {
+                    ProductFilterChip(product: nil, title: "all", selected: ui.selectedProduct == nil) {
                         withAnimation(.smooth(duration: 0.22)) {
                             ui.selectedSessionID = nil
                             ui.selectedProduct = nil
                             ui.selectedAccountID = nil
                         }
                     }
-                    ProductFilterChip(symbol: "*", title: "claude", selected: ui.selectedProduct == .claude) {
+                    ProductFilterChip(product: .claude, title: "claude", selected: ui.selectedProduct == .claude) {
                         withAnimation(.smooth(duration: 0.22)) {
                             ui.selectedSessionID = nil
                             ui.selectedProduct = .claude
                             ui.selectedAccountID = nil
                         }
                     }
-                    ProductFilterChip(symbol: ">_", title: "codex", selected: ui.selectedProduct == .codex) {
+                    ProductFilterChip(product: .codex, title: "codex", selected: ui.selectedProduct == .codex) {
                         withAnimation(.smooth(duration: 0.22)) {
                             ui.selectedSessionID = nil
                             ui.selectedProduct = .codex
                             ui.selectedAccountID = nil
                         }
                     }
-                    ProductFilterChip(symbol: "⬡", title: "cursor", selected: ui.selectedProduct == .cursor) {
+                    ProductFilterChip(product: .cursor, title: "cursor", selected: ui.selectedProduct == .cursor) {
                         withAnimation(.smooth(duration: 0.22)) {
                             ui.selectedSessionID = nil
                             ui.selectedProduct = .cursor
@@ -453,17 +453,6 @@ private struct ExpandedContent: View {
                 .padding(.bottom, 14)
 
                 if let account {
-                    if productAccounts.count > 1 {
-                        AccountSelector(
-                            accounts: productAccounts,
-                            selectedID: account.id,
-                            activeClaudeAccountID: store.activeClaudeAccountID) { id in
-                            withAnimation(.smooth(duration: 0.22)) {
-                                ui.selectedAccountID = id
-                            }
-                        }
-                        .padding(.bottom, 8)
-                    }
                     AccountSummaryCard(
                         account: account,
                         isActive: account.product == .claude && account.id == store.activeClaudeAccountID,
@@ -524,48 +513,8 @@ private func summaryAccount(_ accounts: [AccountUsage], selectedAccountID: Strin
     return accounts.max { $0.activityStamp < $1.activityStamp }
 }
 
-private struct AccountSelector: View {
-    let accounts: [AccountUsage]
-    let selectedID: String
-    let activeClaudeAccountID: String?
-    let onSelect: (String) -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(accounts) { account in
-                    Button {
-                        onSelect(account.id)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(verbatim: shortAccountLabel(account.label))
-                                .font(.system(size: 12, weight: .semibold))
-                                .lineLimit(1)
-                            if account.product == .claude, account.id == activeClaudeAccountID {
-                                Text(verbatim: "LIVE")
-                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(claudeOrange)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(.white.opacity(account.id == selectedID ? 0.16 : 0.07))
-                                .overlay(Capsule().stroke(
-                                    .white.opacity(account.id == selectedID ? 0.24 : 0.10), lineWidth: 1))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(account.id == selectedID ? .white : .white.opacity(0.62))
-                }
-            }
-        }
-    }
-}
-
 private struct ProductFilterChip: View {
-    let symbol: String
+    let product: Product?   // nil = "all"
     let title: String
     let selected: Bool
     let action: () -> Void
@@ -573,14 +522,19 @@ private struct ProductFilterChip: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                Text(verbatim: symbol)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(selected ? peach : .white.opacity(0.42))
+                if let product {
+                    productTile(product, size: 16)
+                } else {
+                    Image(systemName: "asterisk")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(selected ? peach : .white.opacity(0.5))
+                        .frame(width: 16, height: 16)
+                }
                 Text(verbatim: title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(selected ? .white : .white.opacity(0.58))
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 7)
             .background(
                 Capsule()

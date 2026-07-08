@@ -1,41 +1,28 @@
 import Foundation
 
-// Which sessions' terminals are still open. The transcript can't tell us (an
-// idle-but-open session writes nothing, and the CLI doesn't hold the .jsonl
-// open), so we read the process table: a session is "alive" while a process of
-// its product runs with the session's cwd.
+// Which Claude sessions' terminals are still open. Claude runs as
+// `claude --session-id <uuid>`, and that uuid is the transcript filename — so the
+// process argv names its exact session. That's precise per-session liveness: it
+// tells apart several sessions in ONE folder, which a cwd match can't.
 //
-// ponytail: cwd-keyed — two sessions sharing one cwd stay alive until BOTH
-// terminals close. Same ceiling the terminal-focus code in NotchView accepts.
-// ponytail: Codex.app / Cursor run their agent at "/" (not the project dir), so
-// their idle sessions fall back to working-only until we have a better signal.
+// ponytail: Codex runs one shared `app-server` and Cursor's agent is in-app —
+// neither names a session in argv, so those fall back to working-only (see
+// SessionEngine.publishable).
 enum SessionLiveness {
-    // "<product.rawValue>|<cwd>" for every running agent CLI. One ps + one lsof.
-    static func liveKeys() -> Set<String> {
-        let byComm: [String: Product] = ["claude": .claude, "codex": .codex, "cursor-agent": .cursor]
-        var product: [pid_t: Product] = [:]
-        for line in run("/bin/ps", ["-axo", "pid=,comm="]).split(whereSeparator: \.isNewline) {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard let sp = t.firstIndex(of: " "), let pid = pid_t(t[..<sp]) else { continue }
-            let comm = URL(fileURLWithPath: String(t[t.index(after: sp)...]).trimmingCharacters(in: .whitespaces)).lastPathComponent
-            if let p = byComm[comm] { product[pid] = p }
+    // Session UUIDs of every running `claude --session-id <uuid>`.
+    // Returns nil if the probe itself failed, so a transient hiccup never flips
+    // live sessions to "dead" (ps -axww always prints something on success).
+    static func liveClaudeSessionIDs() -> Set<String>? {
+        let out = run("/bin/ps", ["-axww", "-o", "args="])
+        guard !out.isEmpty else { return nil }
+        var ids = Set<String>()
+        for line in out.split(whereSeparator: \.isNewline) {
+            guard line.contains("/claude"), let r = line.range(of: "--session-id") else { continue }
+            let id = line[r.upperBound...].drop { $0 == " " || $0 == "=" }.prefix { !$0.isWhitespace }
+            if !id.isEmpty { ids.insert(String(id)) }
         }
-        guard !product.isEmpty else { return [] }
-
-        // lsof -Fpn emits "p<pid>" then "n<cwd>" pairs; pair each live cwd with its product.
-        let pids = product.keys.map(String.init).joined(separator: ",")
-        var keys = Set<String>()
-        var cur: pid_t?
-        for line in run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", pids, "-Fpn"]).split(whereSeparator: \.isNewline) {
-            if line.hasPrefix("p") { cur = pid_t(line.dropFirst()) }
-            else if line.hasPrefix("n"), let pid = cur, let p = product[pid] {
-                keys.insert(key(product: p, cwd: String(line.dropFirst())))
-            }
-        }
-        return keys
+        return ids
     }
-
-    static func key(product: Product, cwd: String) -> String { "\(product.rawValue)|\(cwd)" }
 
     // ponytail: mirrors NotchView.shellOut; kept private here to avoid coupling the
     // engine to the view file.
