@@ -4,9 +4,9 @@ private let socketPath = NSString(string: "~/.agentnotch/approvals.sock").expand
 
 // Hook helper: stdin JSON → Unix socket → stdout decision JSON.
 //
-// Claude side: registered on PermissionRequest, which Claude only fires when it
-// would stop and ask the user itself — permission modes, allowlists, and "always
-// allow" rules are already honored, so no tool-safety guessing happens here.
+// Claude side: registered on PreToolUse so a deny can return a model-visible
+// permissionDecisionReason (a PermissionRequest deny can't). Read-only tools defer to
+// Claude's own permission flow (we print nothing); mutating/exec tools reach the notch.
 // On any failure we print nothing, which falls through to Claude's own prompt.
 // Cursor side: beforeShellExecution; prompt only for unsandboxed commands.
 @main
@@ -16,10 +16,7 @@ struct AgentNotchHook {
         guard !stdin.isEmpty else { return }
 
         var payload = (try? JSONSerialization.jsonObject(with: stdin) as? [String: Any]) ?? [:]
-
-        // A stale install may still fire us on PreToolUse; never interfere there —
-        // Claude's own permission flow handles it.
-        if payload["hook_event_name"] as? String == "PreToolUse" { return }
+        let event = payload["hook_event_name"] as? String ?? "PreToolUse"
 
         payload["id"] = payload["id"] as? String ?? UUID().uuidString
 
@@ -30,14 +27,16 @@ struct AgentNotchHook {
         payload["toolName"] = tool
         payload["summary"] = summary(payload) ?? tool
 
-        // Cursor auto-runs sandboxed commands; only unsandboxed ones need the notch.
-        guard needsApproval(product: product, payload: payload) else {
+        // Cursor: only unsandboxed commands. Claude: read-only tools defer to Claude's own
+        // flow (print nothing); mutating/exec tools go to the notch, where a deny can steer
+        // the model via PreToolUse's permissionDecisionReason.
+        guard needsApproval(product: product, tool: tool, payload: payload) else {
             failOpen(product: product)
             return
         }
 
         guard let reqData = try? JSONSerialization.data(withJSONObject: payload),
-              let resp = roundTrip(reqData, product: product) else {
+              let resp = roundTrip(reqData, product: product, event: event) else {
             failOpen(product: product)
             return
         }
@@ -59,6 +58,7 @@ struct AgentNotchHook {
             return "cursor"
         }
         if p["hook_event_name"] as? String == "PermissionRequest"
+            || p["hook_event_name"] as? String == "PreToolUse"
             || p["session_id"] != nil || p["transcript_path"] != nil {
             return "claude"
         }
@@ -85,18 +85,26 @@ struct AgentNotchHook {
         return p["tool_name"] as? String
     }
 
-    private static func needsApproval(product: String, payload: [String: Any]) -> Bool {
-        // Cursor auto-runs safe commands inside its own sandbox and only asks the
-        // user when a command must run with full access (`sandbox` == false).
-        // Claude's PermissionRequest event is already exactly "Claude would ask",
-        // so everything else goes to the notch.
+    private static func needsApproval(product: String, tool: String, payload: [String: Any]) -> Bool {
+        // Cursor auto-runs safe commands inside its own sandbox and only asks when a
+        // command must run with full access (`sandbox` == false).
         if product == "cursor", let sandboxed = payload["sandbox"] as? Bool { return !sandboxed }
+        // Claude fires PreToolUse for every tool; defer read-only ones to its own flow
+        // so only mutating/exec tools reach the notch.
+        if product == "claude" { return !claudeSafeTools.contains(tool) }
         return true
     }
 
+    // Read-only / inspection tools agentNotch never prompts for.
+    private static let claudeSafeTools: Set<String> = [
+        "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
+        "TodoWrite", "TodoRead", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
+        "ToolSearch", "BashOutput",
+    ]
+
     // MARK: - Socket round trip
 
-    private static func roundTrip(_ request: Data, product: String) -> Data? {
+    private static func roundTrip(_ request: Data, product: String, event: String) -> Data? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -133,22 +141,29 @@ struct AgentNotchHook {
 
         guard let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return buf }
         let decision = obj["decision"] as? String ?? "allow"
-        return formatOutput(product: product, decision: decision)
+        let reason = obj["reason"] as? String
+        return formatOutput(product: product, event: event, decision: decision, reason: reason)
     }
 
-    private static func formatOutput(product: String, decision: String) -> Data? {
+    private static func formatOutput(product: String, event: String = "PreToolUse", decision: String, reason: String? = nil) -> Data? {
         let effective = decision == "always" ? "allow" : decision
         let obj: [String: Any]
         switch product {
         case "cursor":
             obj = ["permission": effective, "continue": true]
         case "claude":
-            obj = [
-                "hookSpecificOutput": [
+            if event == "PermissionRequest" {
+                // A PermissionRequest deny carries behavior only — no model-visible reason.
+                obj = ["hookSpecificOutput": [
                     "hookEventName": "PermissionRequest",
                     "decision": ["behavior": effective],
-                ],
-            ]
+                ]]
+            } else {
+                // PreToolUse: a deny's permissionDecisionReason is fed back to the model.
+                var hso: [String: Any] = ["hookEventName": "PreToolUse", "permissionDecision": effective]
+                if let reason, !reason.isEmpty { hso["permissionDecisionReason"] = reason }
+                obj = ["hookSpecificOutput": hso]
+            }
         default:
             obj = ["decision": effective]
         }

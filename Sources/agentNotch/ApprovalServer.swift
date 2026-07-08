@@ -22,7 +22,7 @@ final class ApprovalServer {
                                              qos: .userInitiated, attributes: .concurrent)
     private var source: DispatchSourceRead?
     private var serverFD: Int32 = -1
-    private var waiters: [String: (ApprovalDecision) -> Void] = [:]
+    private var waiters: [String: (ApprovalDecision, String?) -> Void] = [:]
     private var alwaysAllow: Set<String> = []
 
     init(store: UsageStore,
@@ -39,7 +39,7 @@ final class ApprovalServer {
     }
 
     // Called on the main thread from the notch UI (button / key monitor).
-    func decide(_ id: String, decision: ApprovalDecision) {
+    func decide(_ id: String, decision: ApprovalDecision, reason: String? = nil) {
         let alwaysKey = decision == .always
             ? store.pendingApprovals.first(where: { $0.id == id })?.alwaysKey
             : nil
@@ -52,7 +52,7 @@ final class ApprovalServer {
                 self.saveAlwaysAllow()
             }
             let effective: ApprovalDecision = decision == .always ? .allow : decision
-            self.waiters.removeValue(forKey: id)?(effective)
+            self.waiters.removeValue(forKey: id)?(effective, reason)
         }
     }
 
@@ -117,33 +117,38 @@ final class ApprovalServer {
             return
         }
 
-        let decision = blockForDecision(request)
-        writeDecision(clientFD, request: request, decision: decision)
+        let (decision, reason) = blockForDecision(request)
+        writeDecision(clientFD, request: request, decision: decision, reason: reason)
     }
 
-    private func blockForDecision(_ request: ApprovalRequest) -> ApprovalDecision {
+    private func blockForDecision(_ request: ApprovalRequest) -> (ApprovalDecision, String?) {
         let sem = DispatchSemaphore(value: 0)
         var result = ApprovalDecision.allow
+        var resultReason: String? = nil
         DispatchQueue.main.async { [store] in
             if !store.pendingApprovals.contains(where: { $0.id == request.id }) {
                 store.pendingApprovals.append(request)
             }
         }
         stateQueue.async { [weak self] in
-            self?.waiters[request.id] = { decision in
+            self?.waiters[request.id] = { decision, reason in
                 result = decision
+                resultReason = reason
                 sem.signal()
             }
         }
         sem.wait()
         stateQueue.async { [weak self] in self?.waiters.removeValue(forKey: request.id) }
-        return result
+        return (result, resultReason)
     }
 
-    // The hook owns the harness-specific output shapes; we hand it just the verdict.
-    private func writeDecision(_ fd: Int32, request: ApprovalRequest, decision: ApprovalDecision) {
+    // The hook owns the harness-specific output shapes; we hand it just the verdict
+    // and, for a deny-with-feedback, the reason the user typed (fed back to the model).
+    private func writeDecision(_ fd: Int32, request: ApprovalRequest, decision: ApprovalDecision, reason: String? = nil) {
         let effective: ApprovalDecision = decision == .always ? .allow : decision
-        guard let data = try? JSONSerialization.data(withJSONObject: ["decision": effective.rawValue]) else { return }
+        var obj: [String: Any] = ["decision": effective.rawValue]
+        if let reason, !reason.isEmpty { obj["reason"] = reason }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         var out = data
         out.append(0x0A)
         _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }

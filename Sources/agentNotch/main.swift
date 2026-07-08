@@ -36,6 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HookInstaller.sync(config: config)
 
         sessions = SessionEngine(config: config, store: controller.store)
+        controller.store.loadOrganize()
+        sessions.updatePinned(controller.store.pinnedSessionIDs)
+        controller.store.onPinsChanged = { [weak self] in
+            guard let self else { return }
+            self.sessions.updatePinned(self.controller.store.pinnedSessionIDs)
+        }
         sessions.start()
         limits = LimitsEngine(config: config) { [weak self] accounts in
             self?.controller.store.accounts = accounts

@@ -7,12 +7,26 @@ struct AgentSession: Equatable, Identifiable {
     var sessionID: String? = nil
     var title: String
     var detail: String = "Working"
+    var model: String? = nil
     var inputTokens = 0
     var outputTokens = 0
     var lastActivity: Date
-    var isActive = false
+    var isActive = false        // mid-turn: the agent is working right now
+    var isAlive = false         // the hosting terminal/CLI process is still open
     var cwd: String? = nil
     var transcriptPath: String
+    var todos: [TodoItem] = []
+    var activity: [ActivityEntry] = []
+}
+
+struct TodoItem: Equatable {
+    var text: String
+    var status: String   // lenient: "pending" / "in_progress" / "completed"
+}
+
+struct ActivityEntry: Equatable {
+    let at: Date
+    let text: String
 }
 
 enum ApprovalDecision: String, Equatable, Codable {
@@ -36,6 +50,9 @@ struct ApprovalRequest: Equatable, Identifiable {
     var sessions: [AgentSession] = []
     var pendingApprovals: [ApprovalRequest] = []
     var activeClaudeAccountID: String? = nil
+    var pinnedSessionIDs: Set<String> = []
+    var hiddenSessionIDs: Set<String> = []
+    @ObservationIgnored var onPinsChanged: (() -> Void)? = nil   // engine handoff, wired in main.swift
 }
 
 // MARK: - Real-limit models (per-account, per-window)
@@ -140,4 +157,38 @@ extension UsageStore {
     }
 
     var currentApproval: ApprovalRequest? { pendingApprovals.first }
+
+    // Most-recently-active, non-hidden session — drives the collapsed "now playing" line.
+    var topActiveSession: AgentSession? {
+        sessions.first { $0.isActive && !hiddenSessionIDs.contains($0.id) }
+    }
+
+    // MARK: - Organize (pin / dismiss) persistence — mirrors ApprovalServer's always-allow.json.
+
+    private static let organizePath = NSString(string: "~/.agentnotch/organize.json").expandingTildeInPath
+
+    func togglePin(_ id: String) {
+        if pinnedSessionIDs.contains(id) { pinnedSessionIDs.remove(id) } else { pinnedSessionIDs.insert(id) }
+        persistOrganize(); onPinsChanged?()
+    }
+
+    func setHidden(_ id: String, _ hidden: Bool) {
+        if hidden { hiddenSessionIDs.insert(id) } else { hiddenSessionIDs.remove(id) }
+        persistOrganize()
+    }
+
+    func loadOrganize() {
+        guard let data = FileManager.default.contents(atPath: Self.organizePath),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String]] else { return }
+        pinnedSessionIDs = Set(obj["pinned"] ?? [])
+        hiddenSessionIDs = Set(obj["hidden"] ?? [])
+    }
+
+    func persistOrganize() {
+        let obj = ["pinned": Array(pinnedSessionIDs).sorted(), "hidden": Array(hiddenSessionIDs).sorted()]
+        let dir = (Self.organizePath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        try? data.write(to: URL(fileURLWithPath: Self.organizePath), options: .atomic)
+    }
 }

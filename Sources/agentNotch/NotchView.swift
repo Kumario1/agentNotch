@@ -16,6 +16,7 @@ import Observation
     var selectedProduct: Product? = nil
     var selectedAccountID: String? = nil
     var bouncing = false
+    var collectingFeedback = false   // typing a deny reason — pauses the approval key monitor
 }
 
 // The Apple-notch silhouette: concave flares at the top outer corners (wallpaper
@@ -105,7 +106,7 @@ struct NotchRootView: View {
     var ui: NotchState
     var m: NotchMetrics
     var onOpenSettings: () -> Void = {}
-    var onApprovalDecision: (String, ApprovalDecision) -> Void = { _, _ in }
+    var onApprovalDecision: (String, ApprovalDecision, String?) -> Void = { _, _, _ in }
     var onSwitchClaudeAccount: (String) -> Void = { _ in }
 
     var body: some View {
@@ -135,6 +136,9 @@ struct NotchRootView: View {
             } else if let approval = store.currentApproval {
                 CollapsedApproval(request: approval, notchWidth: m.notchWidth)
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
+            } else if let top = store.topActiveSession {
+                NowPlaying(session: top, notchWidth: m.notchWidth)
+                    .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
             } else {
                 CollapsedContent(store: store, notchWidth: m.notchWidth)
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
@@ -161,41 +165,67 @@ struct NotchRootView: View {
 
 // MARK: - Shared pieces (matched between both layouts)
 
-// Rounded-square Claude mark, like the reference's app tiles.
-private struct ClaudeTile: View {
-    var size: CGFloat = 26
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-            .fill(Color(red: 0.23, green: 0.13, blue: 0.10))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .overlay(
-                Image(systemName: "asterisk")
-                    .font(.system(size: size * 0.42, weight: .bold))
-                    .foregroundStyle(claudeOrange)
-            )
-            .frame(width: size, height: size)
+// Brand logos bundled as resources (Sources/agentNotch/Resources). Loaded once;
+// nil if a resource is missing, so tiles fall back to their drawn glyph.
+private enum Brand {
+    static let claude = load("claude")
+    static let codex = load("codex")
+    static let cursor = load("cursor")
+    private static func load(_ name: String) -> Image? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
+              let ns = NSImage(contentsOf: url) else { return nil }
+        return Image(nsImage: ns)
     }
 }
 
-// Rounded-square Codex mark: the ">_" terminal prompt.
+// Rounded-square product tile: brand logo over a per-product background, with a
+// drawn-glyph fallback if the image resource is unavailable.
+private struct BrandTile<Fallback: View>: View {
+    var size: CGFloat
+    var bg: Color
+    var image: Image?
+    var inset: CGFloat = 0.16
+    @ViewBuilder var fallback: () -> Fallback
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+        shape
+            .fill(bg)
+            .overlay {
+                if let image {
+                    image.resizable().scaledToFit().padding(size * inset)
+                } else {
+                    fallback()
+                }
+            }
+            .overlay(shape.stroke(.white.opacity(0.08), lineWidth: 1))
+            .frame(width: size, height: size)
+            .clipShape(shape)
+    }
+}
+
+// Orange pixel logo on the warm dark tile (logo art is transparent).
+private struct ClaudeTile: View {
+    var size: CGFloat = 26
+    var body: some View {
+        BrandTile(size: size, bg: Color(red: 0.23, green: 0.13, blue: 0.10),
+                  image: Brand.claude, inset: 0.12) {
+            Image(systemName: "asterisk")
+                .font(.system(size: size * 0.42, weight: .bold))
+                .foregroundStyle(claudeOrange)
+        }
+    }
+}
+
+// Black cloud/prompt logo (transparent art) → light tile so it reads.
 private struct CodexTile: View {
     var size: CGFloat = 26
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-            .fill(Color(white: 0.13))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .overlay(
-                Text(verbatim: ">_")
-                    .font(.system(size: size * 0.42, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
-            )
-            .frame(width: size, height: size)
+        BrandTile(size: size, bg: Color(white: 0.95), image: Brand.codex, inset: 0.14) {
+            Text(verbatim: ">_")
+                .font(.system(size: size * 0.42, weight: .bold, design: .monospaced))
+                .foregroundStyle(.black.opacity(0.85))
+        }
     }
 }
 
@@ -207,18 +237,14 @@ private struct CodexTile: View {
     }
 }
 
-// Rounded-square Cursor mark: the isometric cube from the Cursor app icon.
+// Cube logo ships with its own cream background → fill the tile edge-to-edge.
 private struct CursorTile: View {
     var size: CGFloat = 26
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-            .fill(Color(white: 0.10))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .overlay(CursorCube().frame(width: size * 0.56, height: size * 0.60))
-            .frame(width: size, height: size)
+        BrandTile(size: size, bg: Color(red: 0.95, green: 0.94, blue: 0.90),
+                  image: Brand.cursor, inset: 0) {
+            CursorCube().frame(width: size * 0.56, height: size * 0.60)
+        }
     }
 }
 
@@ -321,6 +347,42 @@ private struct CollapsedContent: View {
     }
 }
 
+// MARK: - Collapsed layout: "now playing" — the top working session (instead of gauges)
+
+private struct NowPlaying: View {
+    let session: AgentSession
+    let notchWidth: CGFloat
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                productTile(session.product, size: 22)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(verbatim: session.title)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(verbatim: session.detail)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(peach)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: notchWidth)
+            TimelineView(.periodic(from: .now, by: 15)) { _ in
+                Text(verbatim: shortAge(session.lastActivity))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(peach.opacity(0.9))
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 // MARK: - Collapsed layout: pending-approval alert (replaces the gauges while waiting)
 
 private struct CollapsedApproval: View {
@@ -366,11 +428,11 @@ private struct ExpandedContent: View {
     var store: UsageStore
     var ui: NotchState
     var onOpenSettings: () -> Void
-    var onApprovalDecision: (String, ApprovalDecision) -> Void
+    var onApprovalDecision: (String, ApprovalDecision, String?) -> Void
     var onSwitchClaudeAccount: (String) -> Void
 
     var body: some View {
-        let sessions = store.sessions
+        let sessions = store.sessions.filter { !store.hiddenSessionIDs.contains($0.id) }
         let visibleSessions = ui.selectedProduct.map { product in sessions.filter { $0.product == product } } ?? sessions
         let selected = visibleSessions.first { $0.id == ui.selectedSessionID }
         let productAccounts = filteredAccounts(store.accounts, selectedProduct: ui.selectedProduct)
@@ -394,7 +456,7 @@ private struct ExpandedContent: View {
             .padding(.bottom, 12)
 
             if let approval = store.currentApproval {
-                ApprovalCard(request: approval, onDecision: onApprovalDecision)
+                ApprovalCard(request: approval, ui: ui, onDecision: onApprovalDecision)
                     .padding(.bottom, 12)
             } else {
                 HStack(spacing: 8) {
@@ -461,7 +523,12 @@ private struct ExpandedContent: View {
                         ScrollView(showsIndicators: false) {
                             LazyVStack(spacing: 0) {
                                 ForEach(visibleSessions) { session in
-                                    SessionRow(session: session) {
+                                    SessionRow(
+                                        session: session,
+                                        pinned: store.pinnedSessionIDs.contains(session.id),
+                                        onTogglePin: { store.togglePin(session.id) },
+                                        onHide: { withAnimation(.smooth(duration: 0.25)) { store.setHidden(session.id, true) } }
+                                    ) {
                                         // Open the session where it lives: expand the card
                                         // and bring the hosting terminal/app forward.
                                         withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = session.id }
@@ -668,7 +735,11 @@ private struct EmptySessions: View {
 
 private struct ApprovalCard: View {
     let request: ApprovalRequest
-    let onDecision: (String, ApprovalDecision) -> Void
+    var ui: NotchState
+    let onDecision: (String, ApprovalDecision, String?) -> Void
+    @State private var showFeedback = false
+    @State private var reason = ""
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -694,21 +765,37 @@ private struct ApprovalCard: View {
 
             HStack(spacing: 8) {
                 ApprovalButton(title: "Always Allow", shortcut: "⌥A", style: .outline) {
-                    onDecision(request.id, .always)
+                    onDecision(request.id, .always, nil)
                 }
                 ApprovalButton(title: "Allow", shortcut: "⌘A", style: .primary) {
-                    onDecision(request.id, .allow)
+                    onDecision(request.id, .allow, nil)
                 }
             }
-            Button {
-                onDecision(request.id, .deny)
-            } label: {
-                Text("Deny with feedback")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.42))
+            if showFeedback {
+                TextField("Why deny? Claude will see this.", text: $reason, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white)
+                    .lineLimit(1...3)
+                    .padding(9)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.black.opacity(0.35)))
+                    .focused($fieldFocused)
+                    .onSubmit(sendDeny)
+                HStack(spacing: 8) {
+                    ApprovalButton(title: "Cancel", shortcut: "", style: .outline) {
+                        showFeedback = false; reason = ""
+                    }
+                    ApprovalButton(title: "Send deny", shortcut: "⏎", style: .primary, action: sendDeny)
+                }
+            } else {
+                Button { showFeedback = true; fieldFocused = true } label: {
+                    Text("Deny with feedback")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.42))
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
         }
         .padding(14)
         .background(
@@ -716,6 +803,15 @@ private struct ApprovalCard: View {
                 .fill(.white.opacity(0.10))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(peach.opacity(0.35), lineWidth: 1))
         )
+        .onChange(of: showFeedback) { _, v in ui.collectingFeedback = v }
+        .onChange(of: request.id) { _, _ in showFeedback = false; reason = "" }
+        .onDisappear { ui.collectingFeedback = false }
+    }
+
+    private func sendDeny() {
+        onDecision(request.id, .deny, reason.isEmpty ? nil : reason)
+        showFeedback = false
+        reason = ""
     }
 }
 
@@ -753,6 +849,9 @@ private struct ApprovalButton: View {
 
 private struct SessionRow: View {
     let session: AgentSession
+    var pinned = false
+    var onTogglePin: () -> Void = {}
+    var onHide: () -> Void = {}
     let select: () -> Void
 
     var body: some View {
@@ -761,6 +860,11 @@ private struct SessionRow: View {
                 productTile(session.product, size: 30)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
+                        if pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(peach.opacity(0.8))
+                        }
                         Text(verbatim: session.title)
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white)
@@ -793,12 +897,17 @@ private struct SessionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin", action: onTogglePin)
+            Button("Dismiss", systemImage: "eye.slash", action: onHide)
+        }
     }
 }
 
 private struct SessionControl: View {
     let session: AgentSession
     let close: () -> Void
+    @State private var confirmingStop = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -809,10 +918,20 @@ private struct SessionControl: View {
             HStack(spacing: 12) {
                 productTile(session.product, size: 42)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(verbatim: session.title)
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(verbatim: session.title)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let model = shortModel(session.model) {
+                            Text(verbatim: model)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(peach)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(peach.opacity(0.14)))
+                        }
+                    }
                     Text(verbatim: session.detail)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundStyle(peach)
@@ -834,12 +953,19 @@ private struct SessionControl: View {
                     MetricPill(label: "IN", value: compactCount(session.inputTokens))
                     MetricPill(label: "OUT", value: compactCount(session.outputTokens))
                 }
+                if let cost = estimatedCost(session) {
+                    MetricPill(label: "COST", value: cost)
+                }
                 TimelineView(.periodic(from: .now, by: 15)) { _ in
                     MetricPill(label: "AGE", value: shortAge(session.lastActivity))
                 }
             }
 
+            if !session.todos.isEmpty { TodoList(todos: session.todos) }
+            if !session.activity.isEmpty { ActivityFeed(activity: session.activity) }
+
             HStack(spacing: 8) {
+                ControlButton(icon: "macwindow", title: "Focus") { focusSession(session) }
                 ControlButton(icon: "folder", title: "Open") {
                     if let cwd = session.cwd {
                         NSWorkspace.shared.open(URL(fileURLWithPath: cwd, isDirectory: true))
@@ -850,10 +976,25 @@ private struct SessionControl: View {
                 ControlButton(icon: "doc.text.magnifyingglass", title: "Transcript") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.transcriptPath)])
                 }
+            }
+            HStack(spacing: 8) {
                 ControlButton(icon: "doc.on.doc", title: "Copy ID") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(session.sessionID ?? session.id, forType: .string)
                 }
+                Button {
+                    if confirmingStop { stopSession(session); confirmingStop = false }
+                    else { confirmingStop = true }
+                } label: {
+                    Label(confirmingStop ? "Confirm stop?" : "Interrupt", systemImage: "stop.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(confirmingStop ? .white : dangerRed)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(confirmingStop ? dangerRed : dangerRed.opacity(0.14)))
             }
         }
         .padding(14)
@@ -861,6 +1002,81 @@ private struct SessionControl: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.white.opacity(0.08))
         )
+        .onChange(of: session.id) { _, _ in confirmingStop = false }
+    }
+}
+
+// Live checklist — appears only when the session has TodoWrite data (tasks enabled).
+private struct TodoList: View {
+    let todos: [TodoItem]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(todos.prefix(5).enumerated()), id: \.offset) { _, item in
+                HStack(spacing: 7) {
+                    Image(systemName: todoIcon(item.status))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(todoColor(item.status))
+                        .frame(width: 14)
+                    Text(verbatim: item.text)
+                        .font(.system(size: 12, weight: item.status == "in_progress" ? .semibold : .regular))
+                        .foregroundStyle(item.status == "completed" ? .white.opacity(0.4) : .white.opacity(0.85))
+                        .strikethrough(item.status == "completed")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                }
+            }
+            if todos.count > 5 {
+                Text(verbatim: "+\(todos.count - 5) more")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.22)))
+    }
+}
+
+// Recent tool-call / activity timeline (newest first) — the "watch it work" feed.
+private struct ActivityFeed: View {
+    let activity: [ActivityEntry]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(activity.suffix(6).reversed().enumerated()), id: \.offset) { _, entry in
+                HStack(spacing: 8) {
+                    Text(verbatim: shortAge(entry.at))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(width: 30, alignment: .leading)
+                    Text(verbatim: entry.text)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.22)))
+    }
+}
+
+private func todoIcon(_ status: String) -> String {
+    switch status {
+    case "completed": return "checkmark.square.fill"
+    case "in_progress": return "arrowtriangle.forward.square.fill"
+    default: return "square"
+    }
+}
+
+private func todoColor(_ status: String) -> Color {
+    switch status {
+    case "completed": return peach.opacity(0.7)
+    case "in_progress": return peach
+    default: return .white.opacity(0.4)
     }
 }
 
@@ -943,6 +1159,15 @@ private func owningApp(of pid: pid_t) -> NSRunningApplication? {
     return nil
 }
 
+// Interrupt the CLI process backing this session (≈ Esc / Ctrl-C). Reuses hostPid's
+// ps/lsof cwd match. ponytail: SIGINT (not SIGTERM) cancels the current turn rather than
+// killing the session; "first match wins" for a shared cwd (see hostPid).
+private func stopSession(_ session: AgentSession) {
+    DispatchQueue.global(qos: .userInitiated).async {
+        if let pid = hostPid(for: session) { kill(pid, SIGINT) }
+    }
+}
+
 private struct MetricPill: View {
     let label: String
     let value: String
@@ -981,6 +1206,34 @@ private func compactCount(_ n: Int) -> String {
     if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
     if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
     return "\(n)"
+}
+
+// Rough per-1M-token USD prices. Hardcoded and will go stale — a tunable knob, not an
+// engine. ponytail: applied to the blended input count (incl. cheap cache reads), so the
+// figure over-estimates a little — hence the "~". Split cache tokens out for precision.
+private let modelPrices: [(match: String, inPer1M: Double, outPer1M: Double)] = [
+    ("opus", 15, 75),
+    ("sonnet", 3, 15),
+    ("haiku", 0.8, 4),
+    ("gpt-5", 1.25, 10),
+    ("o3", 2, 8),
+]
+
+private func shortModel(_ raw: String?) -> String? {
+    guard let raw = raw?.lowercased() else { return nil }
+    for (m, name) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("gpt-5", "GPT-5"), ("o3", "o3")] {
+        if raw.contains(m) { return name }
+    }
+    return nil
+}
+
+private func estimatedCost(_ session: AgentSession) -> String? {
+    guard let raw = session.model?.lowercased(),
+          session.inputTokens + session.outputTokens > 0,
+          let p = modelPrices.first(where: { raw.contains($0.match) }) else { return nil }
+    let cost = Double(session.inputTokens) / 1_000_000 * p.inPer1M
+             + Double(session.outputTokens) / 1_000_000 * p.outPer1M
+    return String(format: "~$%.2f", cost)
 }
 
 private func productName(_ product: Product) -> String {

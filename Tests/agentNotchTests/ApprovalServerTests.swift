@@ -71,6 +71,39 @@ final class ApprovalServerTests: XCTestCase {
         XCTAssertTrue(responseText.contains("allow"), "expected auto-allow, got: \(responseText)")
     }
 
+    // Deny-with-feedback must carry the user's reason back over the socket so the hook
+    // can feed it to the model via PreToolUse's permissionDecisionReason.
+    func testDenyWithReasonReachesBlockedClient() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath) }
+
+        let store = UsageStore()
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        let reqID = "req-\(short)"
+        var responseText = ""
+        let responseReceived = expectation(description: "hook receives a decision")
+        DispatchQueue.global().async {
+            responseText = Self.roundTrip(socketPath: socketPath, request:
+                #"{"id":"\#(reqID)","product":"claude","toolName":"Bash","command":"rm -rf /"}"#) ?? ""
+            responseReceived.fulfill()
+        }
+
+        let decided = expectation(description: "user denied with feedback")
+        pollForPending(store: store) {
+            server.decide(reqID, decision: .deny, reason: "too destructive, prefer git clean")
+            decided.fulfill()
+        }
+
+        wait(for: [decided, responseReceived], timeout: 5)
+        XCTAssertTrue(responseText.contains("\"deny\""), "expected a deny, got: \(responseText)")
+        XCTAssertTrue(responseText.contains("too destructive"), "reason must ride back to the hook, got: \(responseText)")
+    }
+
     // MARK: - Helpers
 
     private func pollForPending(store: UsageStore, then action: @escaping () -> Void) {

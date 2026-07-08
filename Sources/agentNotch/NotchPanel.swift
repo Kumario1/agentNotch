@@ -94,8 +94,8 @@ final class NotchController {
             ui: ui,
             m: metrics,
             onOpenSettings: { [weak self] in self?.settings.show() },
-            onApprovalDecision: { [weak self] id, decision in
-                self?.approvalServer.decide(id, decision: decision)
+            onApprovalDecision: { [weak self] id, decision, reason in
+                self?.approvalServer.decide(id, decision: decision, reason: reason)
             },
             onSwitchClaudeAccount: { [weak self] accountID in
                 self?.switchClaudeAccount(to: accountID)
@@ -156,20 +156,20 @@ final class NotchController {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let req = self.store.currentApproval else { return event }
+            // Typing a deny reason: never intercept — let the text field receive every key.
+            if self.ui.collectingFeedback { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if event.charactersIgnoringModifiers?.lowercased() == "a" {
-                if flags.contains(.option) {
-                    self.approvalServer.decide(req.id, decision: .always)
-                } else if flags.contains(.command) {
-                    self.approvalServer.decide(req.id, decision: .allow)
-                }
-                return nil
+            let key = event.charactersIgnoringModifiers?.lowercased()
+            if key == "a", flags.contains(.option) {
+                self.approvalServer.decide(req.id, decision: .always); return nil
             }
-            if event.charactersIgnoringModifiers?.lowercased() == "n", flags.contains(.command) {
-                self.approvalServer.decide(req.id, decision: .deny)
-                return nil
+            if key == "a", flags.contains(.command) {
+                self.approvalServer.decide(req.id, decision: .allow); return nil
             }
-            return event
+            if key == "n", flags.contains(.command) {
+                self.approvalServer.decide(req.id, decision: .deny); return nil
+            }
+            return event   // plain keys (incl. a bare "a") pass through
         }
     }
 

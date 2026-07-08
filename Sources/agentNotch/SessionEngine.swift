@@ -29,6 +29,7 @@ enum SessionParsing {
             s.sessionID = sid
         }
 
+        let before = s.detail
         switch product {
         case .claude:
             applyClaude(obj, message: message, to: &s)
@@ -37,6 +38,7 @@ enum SessionParsing {
         case .cursor:
             applyCursor(obj, message: message, to: &s)
         }
+        if s.detail != before { appendActivity(&s, s.detail) }
     }
 
     private static func applyClaude(_ obj: [String: Any], message: [String: Any]?, to s: inout AgentSession) {
@@ -46,10 +48,21 @@ enum SessionParsing {
                 + int(usage["cache_read_input_tokens"])
             s.outputTokens += int(usage["output_tokens"])
         }
+        if let m = message?["model"] as? String, !m.isEmpty { s.model = m }
 
         guard let type = obj["type"] as? String else { return }
-        if type == "last-prompt" || isClaudeStop(obj) {
+        if isClaudeStop(obj) {
             s.isActive = false
+            s.detail = "Idle"   // turn done; the row persists (dimmed) while the terminal stays open
+            return
+        }
+        // `last-prompt` records the just-submitted prompt at the START of a turn (no
+        // timestamp), then the model may think for a minute before its first line.
+        // It's a turn-start marker, not a stop — treating it as inactive hid the
+        // session during that gap ("No sessions" mid-run).
+        if type == "last-prompt" {
+            s.isActive = true
+            if let p = clean(obj["lastPrompt"] as? String) { s.detail = p }
             return
         }
         if type == "user" { s.isActive = true }
@@ -66,11 +79,16 @@ enum SessionParsing {
         if role == "assistant" {
             s.isActive = true
             if let tool = toolName(message["content"]) {
-                s.detail = "Running \(tool)"
+                let input = firstToolInput(message["content"])
+                s.detail = toolDetail(tool, input)
+                if tool == "TodoWrite", let t = parseTodos(input) { s.todos = t }
             } else if text(message["content"]) != nil {
                 s.detail = "Replying"
             }
-            if message["stop_reason"] as? String == "end_turn" { s.isActive = false }
+            if message["stop_reason"] as? String == "end_turn" {
+                s.isActive = false
+                s.detail = "Idle"
+            }
         } else if let t = text(message["content"]) {
             s.isActive = true
             s.detail = t
@@ -83,6 +101,7 @@ enum SessionParsing {
             s.inputTokens = int(usage["input_tokens"])
             s.outputTokens = int(usage["output_tokens"])
         }
+        if let m = payload["model"] as? String, !m.isEmpty { s.model = m }
         guard let type = payload["type"] as? String else { return }
         switch type {
         case "function_call", "custom_tool_call":
@@ -253,6 +272,45 @@ enum SessionParsing {
         return nil
     }
 
+    // Rich detail for a Claude tool call: "Running Bash · git status", "Running Read · Models.swift".
+    // Falls back to "Running <tool>" when there's no useful target — keeps existing rows/tests intact.
+    private static func toolDetail(_ name: String, _ input: [String: Any]?) -> String {
+        guard let target = toolTarget(input) else { return "Running \(name)" }
+        return "Running \(name) · \(target)"
+    }
+
+    private static func toolTarget(_ input: [String: Any]?) -> String? {
+        guard let input else { return nil }
+        if let cmd = clean(input["command"] as? String) { return snippet(cmd) }
+        for k in ["file_path", "path", "notebook_path", "filePath"] {
+            if let p = input[k] as? String, !p.isEmpty { return URL(fileURLWithPath: p).lastPathComponent }
+        }
+        if let q = clean(input["query"] as? String) ?? clean(input["pattern"] as? String) { return snippet(q) }
+        if let u = input["url"] as? String, !u.isEmpty { return snippet(u) }
+        return nil
+    }
+
+    private static func snippet(_ s: String) -> String {
+        s.count > 44 ? String(s.prefix(44)) + "…" : s
+    }
+
+    // Latest TodoWrite call = current checklist (Claude re-emits the whole list each call).
+    private static func parseTodos(_ input: [String: Any]?) -> [TodoItem]? {
+        guard let arr = input?["todos"] as? [[String: Any]] else { return nil }
+        let items = arr.compactMap { d -> TodoItem? in
+            guard let c = (d["content"] as? String) ?? (d["activeForm"] as? String) else { return nil }
+            return TodoItem(text: c, status: (d["status"] as? String) ?? "pending")
+        }
+        return items.isEmpty ? nil : items
+    }
+
+    // Ring buffer (~8) of activity transitions — feeds the detail-card timeline.
+    private static func appendActivity(_ s: inout AgentSession, _ text: String) {
+        guard !text.isEmpty, text != s.activity.last?.text else { return }
+        s.activity.append(ActivityEntry(at: s.lastActivity, text: text))
+        if s.activity.count > 8 { s.activity.removeFirst() }
+    }
+
     private static func text(_ content: Any?) -> String? {
         if let s = clean(content as? String) { return s }
         guard let parts = content as? [[String: Any]] else { return nil }
@@ -291,10 +349,16 @@ final class SessionEngine {
     private var offsets: [String: UInt64] = [:]
     private var partials: [String: Data] = [:]
     private var sessions: [String: AgentSession] = [:]
+    private var pinnedSnapshot: Set<String> = []   // pins mirrored here so scan (utility queue) reads them race-free
 
     init(config: AppConfig, store: UsageStore) {
         self.config = config
         self.store = store
+    }
+
+    // Called from the main thread when the user pins/unpins; hop onto our queue.
+    func updatePinned(_ ids: Set<String>) {
+        queue.async { self.pinnedSnapshot = ids }
     }
 
     func start() {
@@ -342,20 +406,42 @@ final class SessionEngine {
             }
         }
 
-        // Prune sessions aged past the window, and their tail state with them, so
-        // offsets/partials can't grow without bound.
-        for (path, s) in sessions where s.lastActivity < cutoff {
-            sessions[path] = nil
-            offsets[path] = nil
-            partials[path] = nil
+        // A session stays listed until its terminal actually closes, not just while
+        // it's mid-turn. Probe process liveness only when something is idle and could
+        // be kept alive — no ps/lsof when everything's already active or there's nothing.
+        let needLiveness = sessions.values.contains { !$0.isActive && $0.cwd != nil }
+        let live = needLiveness ? SessionLiveness.liveKeys() : []
+        for path in Array(sessions.keys) {
+            guard var s = sessions[path] else { continue }
+            s.isAlive = s.cwd.map { live.contains(SessionLiveness.key(product: s.product, cwd: $0)) } ?? false
+            // Prune only when idle-dead AND aged out: an open-but-idle terminal is never
+            // dropped, while abandoned tail state can't grow without bound.
+            if s.lastActivity < cutoff && !s.isAlive && !pinnedSnapshot.contains(path) {
+                sessions[path] = nil
+                offsets[path] = nil
+                partials[path] = nil
+            } else {
+                sessions[path] = s
+            }
         }
 
-        let sorted = sessions.values
-            .filter { $0.isActive && $0.lastActivity >= cutoff }
-            .sorted { $0.lastActivity > $1.lastActivity }
+        let sorted = SessionEngine.publishable(sessions.values, pinned: pinnedSnapshot)
         DispatchQueue.main.async { [store] in
             if store.sessions != sorted { store.sessions = sorted }
         }
+    }
+
+    // Shown rows: working (mid-turn) or terminal-alive, working ones first, newest
+    // first within each group. Pure so it's unit-testable without touching disk.
+    static func publishable<S: Sequence>(_ sessions: S, pinned: Set<String> = []) -> [AgentSession] where S.Element == AgentSession {
+        sessions
+            .filter { $0.isActive || $0.isAlive || pinned.contains($0.id) }
+            .sorted { lhs, rhs in
+                let lp = pinned.contains(lhs.id), rp = pinned.contains(rhs.id)
+                if lp != rp { return lp }                              // pinned first
+                if lhs.isActive != rhs.isActive { return lhs.isActive } // then working
+                return lhs.lastActivity > rhs.lastActivity             // then newest
+            }
     }
 
     private func isCurrent(_ url: URL, cutoff: Date) -> Bool {
