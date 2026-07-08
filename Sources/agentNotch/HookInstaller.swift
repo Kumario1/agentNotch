@@ -12,7 +12,7 @@ enum HookInstaller {
 
     static func claudeInstalled(settingsPath: String = claudeSettings) -> Bool {
         guard let hooks = loadJSON(settingsPath)?["hooks"] as? [String: Any],
-              let entries = hooks["PreToolUse"] as? [[String: Any]] else { return false }
+              let entries = hooks["PermissionRequest"] as? [[String: Any]] else { return false }
         return entries.contains { isOurs($0) }
     }
 
@@ -22,21 +22,21 @@ enum HookInstaller {
         return shell.contains { isOurs($0) }
     }
 
-    // Registered on PreToolUse (not PermissionRequest): a PreToolUse deny can return a
-    // model-visible permissionDecisionReason, so "Deny with feedback" actually steers the
-    // agent. The hook defers read-only tools itself, so only mutating/exec tools prompt.
-    // Any legacy PermissionRequest entry is removed on install.
+    // Registered on PermissionRequest, not PreToolUse: PermissionRequest only fires when
+    // Claude itself would stop and ask (it already honors permission modes, allowlists, and
+    // accept-edits/auto), so the notch never prompts for tools Claude would auto-run. Any
+    // legacy PreToolUse entry is removed on install.
     @discardableResult
     static func installClaude(settingsPath: String = claudeSettings) -> Bool {
         var root = loadJSON(settingsPath) ?? [:]
         var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var entries = hooks["PreToolUse"] as? [[String: Any]] ?? []
+        var entries = hooks["PermissionRequest"] as? [[String: Any]] ?? []
         entries.removeAll { isOurs($0) }
         entries.insert(ourEntry(), at: 0)
-        hooks["PreToolUse"] = entries
-        if var pr = hooks["PermissionRequest"] as? [[String: Any]] {
-            pr.removeAll { isOurs($0) }
-            if pr.isEmpty { hooks.removeValue(forKey: "PermissionRequest") } else { hooks["PermissionRequest"] = pr }
+        hooks["PermissionRequest"] = entries
+        if var pre = hooks["PreToolUse"] as? [[String: Any]] {
+            pre.removeAll { isOurs($0) }
+            if pre.isEmpty { hooks.removeValue(forKey: "PreToolUse") } else { hooks["PreToolUse"] = pre }
         }
         root["hooks"] = hooks
         return writeJSON(root, to: settingsPath)

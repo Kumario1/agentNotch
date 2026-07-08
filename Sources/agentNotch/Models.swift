@@ -158,11 +158,6 @@ extension UsageStore {
 
     var currentApproval: ApprovalRequest? { pendingApprovals.first }
 
-    // Most-recently-active, non-hidden session — drives the collapsed "now playing" line.
-    var topActiveSession: AgentSession? {
-        sessions.first { $0.isActive && !hiddenSessionIDs.contains($0.id) }
-    }
-
     // MARK: - Organize (pin / dismiss) persistence — mirrors ApprovalServer's always-allow.json.
 
     private static let organizePath = NSString(string: "~/.agentnotch/organize.json").expandingTildeInPath

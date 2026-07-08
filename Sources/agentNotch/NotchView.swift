@@ -136,9 +136,6 @@ struct NotchRootView: View {
             } else if let approval = store.currentApproval {
                 CollapsedApproval(request: approval, notchWidth: m.notchWidth)
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
-            } else if let top = store.topActiveSession {
-                NowPlaying(session: top, notchWidth: m.notchWidth)
-                    .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
             } else {
                 CollapsedContent(store: store, notchWidth: m.notchWidth)
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
@@ -344,42 +341,6 @@ private struct CollapsedContent: View {
                 Circle().fill(.white.opacity(0.08)).frame(width: 24, height: 24)
             }
         }
-    }
-}
-
-// MARK: - Collapsed layout: "now playing" — the top working session (instead of gauges)
-
-private struct NowPlaying: View {
-    let session: AgentSession
-    let notchWidth: CGFloat
-
-    var body: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                productTile(session.product, size: 22)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(verbatim: session.title)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(verbatim: session.detail)
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(peach)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Color.clear.frame(width: notchWidth)
-            TimelineView(.periodic(from: .now, by: 15)) { _ in
-                Text(verbatim: shortAge(session.lastActivity))
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(peach.opacity(0.9))
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
