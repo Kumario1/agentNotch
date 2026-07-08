@@ -264,7 +264,14 @@ enum SessionParsing {
 
     private static func clean(_ s: String?) -> String? {
         guard let s else { return nil }
-        let oneLine = s.replacingOccurrences(of: "\n", with: " ")
+        // Strip harness meta tags (keeping their inner text) and ANSI color codes
+        // so raw "<local-command-stdout>…" never shows in the notch.
+        let oneLine = s
+            .replacingOccurrences(
+                of: "</?(?:local-command-stdout|local-command-caveat|command-name|command-message|command-args|system-reminder)>",
+                with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return oneLine.isEmpty ? nil : oneLine
     }
@@ -300,8 +307,11 @@ final class SessionEngine {
 
     private func scan() {
         let cutoff = Date().addingTimeInterval(-currentSessionAge)
-        var live = Set<String>()
 
+        // Ingest every current transcript, active or not: keeping inactive sessions'
+        // parsed state (cumulative tokens, recovered cwd/title, sessionID) means a
+        // session that goes quiet and resumes continues its counts instead of
+        // rebuilding from an empty struct at the current byte offset.
         for dir in config.claudeDirs {
             let root = dir.appendingPathComponent("projects", isDirectory: true)
             let projects = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
@@ -309,9 +319,7 @@ final class SessionEngine {
                 let files = (try? FileManager.default.contentsOfDirectory(
                     at: p, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
                 for f in files where f.pathExtension == "jsonl" {
-                    if isCurrent(f, cutoff: cutoff), ingest(f, product: .claude)?.isActive == true {
-                        live.insert(f.path)
-                    }
+                    if isCurrent(f, cutoff: cutoff) { _ = ingest(f, product: .claude) }
                 }
             }
         }
@@ -321,9 +329,7 @@ final class SessionEngine {
             guard let en = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
             for case let f as URL in en where f.pathExtension == "jsonl" {
-                if isCurrent(f, cutoff: cutoff), ingest(f, product: .codex)?.isActive == true {
-                    live.insert(f.path)
-                }
+                if isCurrent(f, cutoff: cutoff) { _ = ingest(f, product: .codex) }
             }
         }
 
@@ -332,14 +338,21 @@ final class SessionEngine {
             guard let en = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
             for case let f as URL in en where f.path.contains("agent-transcripts") && f.pathExtension == "jsonl" {
-                if isCurrent(f, cutoff: cutoff), ingest(f, product: .cursor)?.isActive == true {
-                    live.insert(f.path)
-                }
+                if isCurrent(f, cutoff: cutoff) { _ = ingest(f, product: .cursor) }
             }
         }
 
-        sessions = sessions.filter { live.contains($0.key) && $0.value.lastActivity >= cutoff && $0.value.isActive }
-        let sorted = sessions.values.sorted { $0.lastActivity > $1.lastActivity }
+        // Prune sessions aged past the window, and their tail state with them, so
+        // offsets/partials can't grow without bound.
+        for (path, s) in sessions where s.lastActivity < cutoff {
+            sessions[path] = nil
+            offsets[path] = nil
+            partials[path] = nil
+        }
+
+        let sorted = sessions.values
+            .filter { $0.isActive && $0.lastActivity >= cutoff }
+            .sorted { $0.lastActivity > $1.lastActivity }
         DispatchQueue.main.async { [store] in
             if store.sessions != sorted { store.sessions = sorted }
         }

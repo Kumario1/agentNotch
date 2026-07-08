@@ -43,6 +43,7 @@ final class HoverView: NSView {
 
 final class NotchController {
     let store = UsageStore()
+    var onExpand: (() -> Void)?
     private let ui = NotchState()
     private let panel = NotchPanel()
     private let hover = HoverView()
@@ -55,7 +56,6 @@ final class NotchController {
     private var metrics = NotchMetrics(notchWidth: 0, collapsed: .zero, expanded: .zero)
     private var panelRect: CGRect = .zero
     private var collapseWork: DispatchWorkItem?
-    private var accountCount = 1
 
     init(settings: SettingsController, claudeDirs: [URL]) {
         self.settings = settings
@@ -72,12 +72,6 @@ final class NotchController {
     func start() {
         approvalServer.start()
         observeApprovals()
-    }
-
-    func setAccountCount(_ n: Int) {
-        guard n != accountCount, n > 0 else { return }
-        accountCount = n
-        reposition()
     }
 
     func show() {
@@ -200,10 +194,10 @@ final class NotchController {
         }
 
         let collapsed = CGSize(width: notch.width + 260, height: max(notch.height, 24) + 10)
+        // The expanded view shows one account card + a scrolling session list, so the
+        // height is fixed — not scaled by account count. A pending approval needs a bit more.
         let hasApproval = !store.pendingApprovals.isEmpty
-        let baseHeight = max(360, CGFloat(120 + 110 * max(accountCount, 1)))
-        let height = hasApproval ? max(baseHeight, 420) : baseHeight
-        let expanded = CGSize(width: max(540, collapsed.width + 140), height: height)
+        let expanded = CGSize(width: max(540, collapsed.width + 140), height: hasApproval ? 440 : 380)
         metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed, expanded: expanded)
         panelRect = CGRect(x: notch.midX - expanded.width / 2, y: notch.maxY - expanded.height,
                            width: expanded.width, height: expanded.height)
@@ -224,6 +218,7 @@ final class NotchController {
         guard !ui.expanded else { return }
         ui.expanded = true
         updateTracking()
+        onExpand?()
         // Opening while an approval is pending brings keyboard shortcuts online.
         if panel.keyWhilePending {
             panel.makeKeyAndOrderFront(nil)

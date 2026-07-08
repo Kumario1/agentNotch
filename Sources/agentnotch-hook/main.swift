@@ -2,21 +2,25 @@ import Foundation
 
 private let socketPath = NSString(string: "~/.agentnotch/approvals.sock").expandingTildeInPath
 
-// Hook helper: stdin JSON → Unix socket → stdout decision JSON. Fail-open on errors.
+// Hook helper: stdin JSON → Unix socket → stdout decision JSON.
 //
-// Two jobs, in order:
-//   1. Figure out which product fired the hook (Claude vs Cursor) from the payload
-//      shape, so the notch never mislabels a Cursor prompt as "Claude Code".
-//   2. Only bother the user for actions that actually need permission. Read-only
-//      tools (and anything the agent already auto-runs) pass straight through
-//      without touching the app — no socket round trip, no notch prompt.
+// Claude side: registered on PermissionRequest, which Claude only fires when it
+// would stop and ask the user itself — permission modes, allowlists, and "always
+// allow" rules are already honored, so no tool-safety guessing happens here.
+// On any failure we print nothing, which falls through to Claude's own prompt.
+// Cursor side: beforeShellExecution; prompt only for unsandboxed commands.
 @main
 struct AgentNotchHook {
     static func main() {
         let stdin = FileHandle.standardInput.readDataToEndOfFile()
-        guard !stdin.isEmpty else { failOpen(); return }
+        guard !stdin.isEmpty else { return }
 
         var payload = (try? JSONSerialization.jsonObject(with: stdin) as? [String: Any]) ?? [:]
+
+        // A stale install may still fire us on PreToolUse; never interfere there —
+        // Claude's own permission flow handles it.
+        if payload["hook_event_name"] as? String == "PreToolUse" { return }
+
         payload["id"] = payload["id"] as? String ?? UUID().uuidString
 
         let product = detectProduct(payload)
@@ -26,18 +30,14 @@ struct AgentNotchHook {
         payload["toolName"] = tool
         payload["summary"] = summary(payload) ?? tool
 
-        // Skip the prompt entirely for low-risk tools; let the action run.
-        guard needsApproval(product: product, tool: tool, payload: payload) else {
+        // Cursor auto-runs sandboxed commands; only unsandboxed ones need the notch.
+        guard needsApproval(product: product, payload: payload) else {
             failOpen(product: product)
             return
         }
 
-        guard let reqData = try? JSONSerialization.data(withJSONObject: payload) else {
-            failOpen(product: product)
-            return
-        }
-
-        guard let resp = roundTrip(reqData, product: product) else {
+        guard let reqData = try? JSONSerialization.data(withJSONObject: payload),
+              let resp = roundTrip(reqData, product: product) else {
             failOpen(product: product)
             return
         }
@@ -58,7 +58,7 @@ struct AgentNotchHook {
             || p["generation_id"] != nil || p["workspace_roots"] != nil {
             return "cursor"
         }
-        if p["hook_event_name"] as? String == "PreToolUse"
+        if p["hook_event_name"] as? String == "PermissionRequest"
             || p["session_id"] != nil || p["transcript_path"] != nil {
             return "claude"
         }
@@ -85,28 +85,13 @@ struct AgentNotchHook {
         return p["tool_name"] as? String
     }
 
-    // Read-only / low-risk tools run without a prompt. Anything that mutates state,
-    // runs a command, hits an MCP server, or is unrecognized needs an approval —
-    // unknown tools default to "ask" so a new capability is never silently allowed.
-    private static let safeClaudeTools: Set<String> = [
-        "read", "glob", "grep", "ls", "todowrite", "todoread", "notebookread",
-        "webfetch", "websearch", "task", "bashoutput", "killbash", "killshell",
-    ]
-
-    private static func needsApproval(product: String, tool: String, payload: [String: Any]) -> Bool {
-        switch product {
-        case "cursor":
-            // Cursor auto-runs safe commands inside its own sandbox and only asks the
-            // user when a command must run with full access (`sandbox` == false).
-            // Mirror that exactly: stay silent for sandboxed commands, prompt only for
-            // the ones Cursor itself would stop and ask about.
-            if let sandboxed = payload["sandbox"] as? Bool { return !sandboxed }
-            return true
-        case "claude":
-            return !safeClaudeTools.contains(tool.lowercased())
-        default:
-            return true
-        }
+    private static func needsApproval(product: String, payload: [String: Any]) -> Bool {
+        // Cursor auto-runs safe commands inside its own sandbox and only asks the
+        // user when a command must run with full access (`sandbox` == false).
+        // Claude's PermissionRequest event is already exactly "Claude would ask",
+        // so everything else goes to the notch.
+        if product == "cursor", let sandboxed = payload["sandbox"] as? Bool { return !sandboxed }
+        return true
     }
 
     // MARK: - Socket round trip
@@ -160,8 +145,8 @@ struct AgentNotchHook {
         case "claude":
             obj = [
                 "hookSpecificOutput": [
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": effective,
+                    "hookEventName": "PermissionRequest",
+                    "decision": ["behavior": effective],
                 ],
             ]
         default:
@@ -172,9 +157,12 @@ struct AgentNotchHook {
         return data
     }
 
+    // Claude: print nothing — an undecided PermissionRequest falls through to
+    // Claude's own interactive prompt, so a dead notch never auto-allows anything.
+    // Cursor: allow, matching its sandboxed-command default.
     private static func failOpen(product: String? = nil) {
-        let p = product ?? "claude"
-        if let data = formatOutput(product: p, decision: "allow") {
+        guard product == "cursor" else { return }
+        if let data = formatOutput(product: "cursor", decision: "allow") {
             FileHandle.standardOutput.write(data)
         }
     }

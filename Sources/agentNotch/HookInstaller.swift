@@ -12,7 +12,7 @@ enum HookInstaller {
 
     static func claudeInstalled(settingsPath: String = claudeSettings) -> Bool {
         guard let hooks = loadJSON(settingsPath)?["hooks"] as? [String: Any],
-              let entries = hooks["PreToolUse"] as? [[String: Any]] else { return false }
+              let entries = hooks["PermissionRequest"] as? [[String: Any]] else { return false }
         return entries.contains { isOurs($0) }
     }
 
@@ -22,14 +22,22 @@ enum HookInstaller {
         return shell.contains { isOurs($0) }
     }
 
+    // Registered on PermissionRequest, not PreToolUse: PermissionRequest only fires
+    // when Claude itself would stop and ask (it already honors permission modes,
+    // allowlists, and "always allow" rules), so the notch never prompts for tools
+    // Claude would auto-run. Any legacy PreToolUse entry is removed on install.
     @discardableResult
     static func installClaude(settingsPath: String = claudeSettings) -> Bool {
         var root = loadJSON(settingsPath) ?? [:]
         var hooks = root["hooks"] as? [String: Any] ?? [:]
-        var entries = hooks["PreToolUse"] as? [[String: Any]] ?? []
+        var entries = hooks["PermissionRequest"] as? [[String: Any]] ?? []
         entries.removeAll { isOurs($0) }
         entries.insert(ourEntry(), at: 0)
-        hooks["PreToolUse"] = entries
+        hooks["PermissionRequest"] = entries
+        if var pre = hooks["PreToolUse"] as? [[String: Any]] {
+            pre.removeAll { isOurs($0) }
+            if pre.isEmpty { hooks.removeValue(forKey: "PreToolUse") } else { hooks["PreToolUse"] = pre }
+        }
         root["hooks"] = hooks
         return writeJSON(root, to: settingsPath)
     }
@@ -37,10 +45,12 @@ enum HookInstaller {
     @discardableResult
     static func uninstallClaude(settingsPath: String = claudeSettings) -> Bool {
         guard var root = loadJSON(settingsPath),
-              var hooks = root["hooks"] as? [String: Any],
-              var entries = hooks["PreToolUse"] as? [[String: Any]] else { return true }
-        entries.removeAll { isOurs($0) }
-        hooks["PreToolUse"] = entries
+              var hooks = root["hooks"] as? [String: Any] else { return true }
+        for key in ["PermissionRequest", "PreToolUse"] {
+            guard var entries = hooks[key] as? [[String: Any]] else { continue }
+            entries.removeAll { isOurs($0) }
+            hooks[key] = entries
+        }
         root["hooks"] = hooks
         return writeJSON(root, to: settingsPath)
     }
@@ -87,11 +97,11 @@ enum HookInstaller {
 
     // MARK: - Helpers
 
-    // Claude Code's `PreToolUse` uses a three-level shape: a matcher group with a
+    // Claude Code hook entries use a three-level shape: a matcher group with a
     // nested `hooks` array of handlers. A flat `{command,type}` entry (the shape we
     // used to write, and the shape Cursor wants) is silently ignored by Claude, so
     // the hook never fires and nothing ever reaches the notch. `matcher: "*"` fires
-    // for every tool; the hook itself auto-allows the safe ones.
+    // for every tool Claude would prompt about.
     private static func ourEntry() -> [String: Any] {
         [
             "matcher": "*",

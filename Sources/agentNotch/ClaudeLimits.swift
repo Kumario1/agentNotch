@@ -41,7 +41,9 @@ enum ClaudeLimits {
     }
 }
 
-// Polls the OAuth usage endpoint for one Claude config dir every 60s.
+// Polls the OAuth usage endpoint for one Claude config dir every 5 minutes —
+// slow enough to never earn a 429, fresh enough because the notch also pokes
+// refreshNow() on expand (throttled to one request per minute).
 // ponytail: no token refresh ever — expired/401 shows "re-login needed" instead.
 final class ClaudeAccountProvider {
     private let dir: URL
@@ -49,6 +51,7 @@ final class ClaudeAccountProvider {
     private let queue: DispatchQueue
     private var timer: DispatchSourceTimer?
     private var last: AccountUsage?
+    private var lastAttempt: Date?
     // Last successful reading, kept so a transient failure (429, offline, blip)
     // doesn't blank the notch to "offline / no stats".
     private var lastGoodWindows: [LimitWindow] = []
@@ -63,10 +66,20 @@ final class ClaudeAccountProvider {
 
     func start() {
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: 60)
+        t.schedule(deadline: .now(), repeating: 300)
         t.setEventHandler { [weak self] in self?.poll() }
         timer = t
         t.resume()
+    }
+
+    // Called when the notch expands so the numbers are fresh while someone is
+    // actually looking. Throttled: never more than one request per minute.
+    func refreshNow() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let t = self.lastAttempt, Date().timeIntervalSince(t) < 60 { return }
+            self.poll()
+        }
     }
 
     private var label: String {
@@ -90,29 +103,18 @@ final class ClaudeAccountProvider {
         return newest
     }
 
+    // Per-dir resolver (file → per-dir namespaced Keychain → global item only for
+    // ~/.claude). Reading the raw global item for any dir would poll a second account
+    // with the default account's token and mislabel whose limits are shown.
     private func credentials() -> ClaudeCredentials? {
-        let f = dir.appendingPathComponent(".credentials.json")
-        if let d = FileManager.default.contents(atPath: f.path), let c = ClaudeLimits.credentials(from: d) {
-            return c
-        }
-        // Keychain fallback (default install stores the same JSON there).
-        // ponytail: shell out to `security` — Security.framework is more code for the same bytes.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        return ClaudeLimits.credentials(from: pipe.fileHandleForReading.readDataToEndOfFile())
+        ClaudeAccountSwitcher.credentialsJSON(forDir: dir).flatMap(ClaudeLimits.credentials)
     }
 
     private func poll() {
         // While rate-limited, keep the last published reading on screen and don't
         // re-hit the endpoint (that's what earns the 429 in the first place).
         if let until = backoffUntil, until > Date() { return }
+        lastAttempt = Date()
 
         var acc = AccountUsage(id: "claude:\(dir.path)", product: .claude, label: label)
         acc.lastActivity = lastActivity

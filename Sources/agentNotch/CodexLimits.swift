@@ -138,10 +138,11 @@ final class CodexAccountProvider {
     private func publish() {
         var acc = AccountUsage(id: "codex:\(dir.path)", product: .codex, label: label)
         if let snap = latest {
-            // A window that has already reset since the snapshot reads as 0%.
+            // A window that has already reset since the snapshot is back to full —
+            // `percent` is *remaining*, so a fresh window reads 100%, not 0%.
             acc.windows = snap.windows.map { w in
                 if let r = w.resetsAt, r < Date() {
-                    return LimitWindow(name: w.name, percent: 0, resetsAt: nil)
+                    return LimitWindow(name: w.name, percent: 100, resetsAt: nil)
                 }
                 return w
             }

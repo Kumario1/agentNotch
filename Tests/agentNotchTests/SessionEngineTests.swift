@@ -48,6 +48,15 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertTrue(s.isActive)
     }
 
+    func testDetailStripsHarnessMetaTagsAndANSI() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data("""
+        {"type":"user","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"user","content":"<local-command-stdout>Set model to \\u001b[1mFable 5\\u001b[22m</local-command-stdout>"}}
+        """.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.detail, "Set model to Fable 5")
+    }
+
     func testClaudeStopMarkersMarkSessionInactive() {
         var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
         SessionParsing.apply(Data("""

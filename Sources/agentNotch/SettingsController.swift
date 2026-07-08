@@ -32,6 +32,11 @@ final class SettingsController {
             w.contentView = host
             w.center()
             w.isReleasedWhenClosed = false
+            // Drop the Dock icon again when Settings closes (show() adds it below).
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
+                NSApp.setActivationPolicy(.accessory)
+            }
             window = w
         } else {
             (window?.contentView as? NSHostingView<SettingsView>)?.rootView = SettingsView(
@@ -80,7 +85,7 @@ struct SettingsView: View {
                 dirList("Cursor", paths: config.cursorDirs.map(\.path)) { config.cursorDirs = urls($0) }
             }
             Section("Approvals") {
-                Toggle("Claude Code (PreToolUse hook)", isOn: $config.approvalsEnabledClaude)
+                Toggle("Claude Code (PermissionRequest hook)", isOn: $config.approvalsEnabledClaude)
                 Text(claudeHookInstalled ? "Hook installed" : "Hook not installed")
                     .font(.caption)
                     .foregroundStyle(claudeHookInstalled ? .green : .secondary)

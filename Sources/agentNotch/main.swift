@@ -22,14 +22,12 @@ private func terminateOtherInstances() {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController!
-    private var engine: UsageEngine!
     private var limits: LimitsEngine!
     private var sessions: SessionEngine!
     private var settings: SettingsController!
     private var config = AppConfig.load()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        config = AppConfig.load()
         settings = SettingsController(config: config) { [weak self] updated in
             self?.config = updated
         }
@@ -37,16 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
         HookInstaller.sync(config: config)
 
-        engine = UsageEngine(store: controller.store)
-        engine.start()
         sessions = SessionEngine(config: config, store: controller.store)
         sessions.start()
         limits = LimitsEngine(config: config) { [weak self] accounts in
-            guard let self else { return }
-            self.controller.store.accounts = accounts
-            self.controller.setAccountCount(accounts.count)
+            self?.controller.store.accounts = accounts
         }
         limits.start()
+        controller.onExpand = { [weak self] in self?.limits.refreshNow() }
         controller.show()
 
         NotificationCenter.default.addObserver(

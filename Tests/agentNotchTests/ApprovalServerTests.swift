@@ -36,8 +36,8 @@ final class ApprovalServerTests: XCTestCase {
         }
 
         wait(for: [decided, responseReceived], timeout: 5)
-        XCTAssertTrue(responseText.contains("\"permission\""),
-                      "expected a cursor permission payload, got: \(responseText)")
+        XCTAssertTrue(responseText.contains("\"decision\""),
+                      "expected a decision payload, got: \(responseText)")
         XCTAssertTrue(responseText.contains("allow"),
                       "expected an allow decision, got: \(responseText)")
         XCTAssertTrue(store.pendingApprovals.isEmpty, "pending approval should be cleared")
@@ -51,7 +51,7 @@ final class ApprovalServerTests: XCTestCase {
         defer { unlink(socketPath); unlink(allowPath) }
 
         // Seed the allowlist with the key the server derives for this request.
-        let alwaysKey = "cursor:Shell:\("ls -la".prefix(40))"
+        let alwaysKey = "cursor:Shell:ls -la"
         let seed = try JSONSerialization.data(withJSONObject: [alwaysKey])
         try seed.write(to: URL(fileURLWithPath: allowPath))
 

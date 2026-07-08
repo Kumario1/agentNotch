@@ -180,7 +180,7 @@ private struct ClaudeTile: View {
     }
 }
 
-// Rounded-square Codex mark, same tile language as ClaudeTile.
+// Rounded-square Codex mark: the ">_" terminal prompt.
 private struct CodexTile: View {
     var size: CGFloat = 26
     var body: some View {
@@ -191,18 +191,9 @@ private struct CodexTile: View {
                     .stroke(.white.opacity(0.08), lineWidth: 1)
             )
             .overlay(
-                ZStack {
-                    ForEach(0..<6, id: \.self) { i in
-                        Capsule()
-                            .fill(.white.opacity(0.88))
-                            .frame(width: size * 0.10, height: size * 0.34)
-                            .offset(y: -size * 0.13)
-                            .rotationEffect(.degrees(Double(i) * 60))
-                    }
-                    Circle()
-                        .fill(Color(white: 0.13))
-                        .frame(width: size * 0.20, height: size * 0.20)
-                }
+                Text(verbatim: ">_")
+                    .font(.system(size: size * 0.42, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
             )
             .frame(width: size, height: size)
     }
@@ -216,22 +207,44 @@ private struct CodexTile: View {
     }
 }
 
-// Rounded-square Cursor mark.
+// Rounded-square Cursor mark: the isometric cube from the Cursor app icon.
 private struct CursorTile: View {
     var size: CGFloat = 26
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-            .fill(Color(red: 0.12, green: 0.14, blue: 0.22))
+            .fill(Color(white: 0.10))
             .overlay(
                 RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
                     .stroke(.white.opacity(0.08), lineWidth: 1)
             )
-            .overlay(
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: size * 0.34, weight: .bold))
-                    .foregroundStyle(cursorAccent)
-            )
+            .overlay(CursorCube().frame(width: size * 0.56, height: size * 0.60))
             .frame(width: size, height: size)
+    }
+}
+
+// Three shaded faces of an isometric cube (top, left, right — like Cursor's logo).
+private struct CursorCube: View {
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            let mid = CGPoint(x: w / 2, y: h / 2)
+            let top = CGPoint(x: w / 2, y: 0)
+            let bottom = CGPoint(x: w / 2, y: h)
+            let ul = CGPoint(x: 0, y: h * 0.25), ur = CGPoint(x: w, y: h * 0.25)
+            let ll = CGPoint(x: 0, y: h * 0.75), lr = CGPoint(x: w, y: h * 0.75)
+            face([top, ur, mid, ul], .white.opacity(0.95))   // top
+            face([ul, mid, bottom, ll], .white.opacity(0.55)) // left
+            face([mid, ur, lr, bottom], .white.opacity(0.30)) // right
+        }
+    }
+
+    private func face(_ pts: [CGPoint], _ color: Color) -> some View {
+        Path { p in
+            p.move(to: pts[0])
+            pts.dropFirst().forEach { p.addLine(to: $0) }
+            p.closeSubpath()
+        }
+        .fill(color)
     }
 }
 
@@ -282,11 +295,20 @@ private struct CollapsedContent: View {
     }
 
     @ViewBuilder private func wing(_ account: AccountUsage?) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             if let account {
                 productTile(account.product, size: 24)
-                if let pct = account.windows.map(\.percent).min(), account.status == nil {
-                    RingGauge(fraction: min(max(pct / 100, 0), 1), product: account.product)
+                if account.status == nil, !account.windows.isEmpty {
+                    // Every window (5H and 7D), each ring labeled underneath.
+                    ForEach(Array(account.windows.prefix(2)), id: \.name) { window in
+                        VStack(spacing: 1) {
+                            RingGauge(fraction: min(max(window.percent / 100, 0), 1),
+                                      product: account.product, size: 20)
+                            Text(verbatim: window.name)
+                                .font(.system(size: 6.5, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.52))
+                        }
+                    }
                 } else {
                     Circle()
                         .fill(cursorAccent.opacity(0.7))
@@ -350,8 +372,7 @@ private struct ExpandedContent: View {
     var body: some View {
         let sessions = store.sessions
         let visibleSessions = ui.selectedProduct.map { product in sessions.filter { $0.product == product } } ?? sessions
-        let selectedIndex = visibleSessions.firstIndex { $0.id == ui.selectedSessionID }
-        let selected = selectedIndex.map { visibleSessions[$0] }
+        let selected = visibleSessions.first { $0.id == ui.selectedSessionID }
         let productAccounts = filteredAccounts(store.accounts, selectedProduct: ui.selectedProduct)
         let account = summaryAccount(productAccounts, selectedAccountID: ui.selectedAccountID)
         VStack(alignment: .leading, spacing: 0) {
@@ -398,7 +419,7 @@ private struct ExpandedContent: View {
                             ui.selectedAccountID = nil
                         }
                     }
-                    ProductFilterChip(symbol: "</>", title: "cursor", selected: ui.selectedProduct == .cursor) {
+                    ProductFilterChip(symbol: "⬡", title: "cursor", selected: ui.selectedProduct == .cursor) {
                         withAnimation(.smooth(duration: 0.22)) {
                             ui.selectedSessionID = nil
                             ui.selectedProduct = .cursor
@@ -429,7 +450,7 @@ private struct ExpandedContent: View {
 
                 ZStack(alignment: .top) {
                     if let selected {
-                        SessionControl(session: selected, tintIndex: selectedIndex ?? 0) {
+                        SessionControl(session: selected) {
                             withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = nil }
                         }
                         .transition(.move(edge: .top).combined(with: .opacity))
@@ -439,9 +460,12 @@ private struct ExpandedContent: View {
                     } else {
                         ScrollView(showsIndicators: false) {
                             LazyVStack(spacing: 0) {
-                                ForEach(Array(visibleSessions.enumerated()), id: \.element.id) { index, session in
-                                    SessionRow(session: session, tintIndex: index) {
+                                ForEach(visibleSessions) { session in
+                                    SessionRow(session: session) {
+                                        // Open the session where it lives: expand the card
+                                        // and bring the hosting terminal/app forward.
                                         withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = session.id }
+                                        focusSession(session)
                                     }
                                     Divider().overlay(.white.opacity(0.09))
                                 }
@@ -729,13 +753,12 @@ private struct ApprovalButton: View {
 
 private struct SessionRow: View {
     let session: AgentSession
-    let tintIndex: Int
     let select: () -> Void
 
     var body: some View {
         Button(action: select) {
             HStack(spacing: 12) {
-                SessionTile(session: session, tintIndex: tintIndex)
+                productTile(session.product, size: 30)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(verbatim: session.title)
@@ -775,7 +798,6 @@ private struct SessionRow: View {
 
 private struct SessionControl: View {
     let session: AgentSession
-    let tintIndex: Int
     let close: () -> Void
 
     var body: some View {
@@ -785,7 +807,7 @@ private struct SessionControl: View {
                 .frame(width: 3, height: 28)
                 .frame(maxWidth: .infinity)
             HStack(spacing: 12) {
-                SessionTile(session: session, size: 42, tintIndex: tintIndex)
+                productTile(session.product, size: 42)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(verbatim: session.title)
                         .font(.system(size: 17, weight: .bold))
@@ -842,36 +864,83 @@ private struct SessionControl: View {
     }
 }
 
-private struct SessionTile: View {
-    let session: AgentSession
-    var size: CGFloat = 30
-    var tintIndex: Int
+// MARK: - Jump to the app hosting a session
 
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-            .fill(tileColor)
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                    .stroke(.white.opacity(0.18), lineWidth: 1)
-            )
-            .overlay(
-                Text(verbatim: String(session.title.prefix(1)).uppercased())
-                    .font(.system(size: size * 0.38, weight: .heavy))
-                    .foregroundStyle(.white)
-            )
-            .frame(width: size, height: size)
+// Find the CLI process for this session (product binary + matching cwd), walk up
+// its parents to the owning GUI app (Terminal, iTerm, Cursor, VS Code, …) and
+// bring it forward. ponytail: terminals get app-level focus, not the exact tab.
+private func focusSession(_ session: AgentSession) {
+    DispatchQueue.global(qos: .userInitiated).async {
+        if let pid = hostPid(for: session), let app = owningApp(of: pid) {
+            DispatchQueue.main.async { app.activate() }
+            return
+        }
+        // Cursor's in-app agent has no CLI process — the app itself is the session.
+        if session.product == .cursor,
+           let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Cursor" }) {
+            DispatchQueue.main.async { app.activate() }
+            return
+        }
+        // Session process is gone: reveal the working folder instead.
+        DispatchQueue.main.async {
+            if let cwd = session.cwd {
+                NSWorkspace.shared.open(URL(fileURLWithPath: cwd, isDirectory: true))
+            }
+        }
     }
+}
 
-    private var tileColor: LinearGradient {
-        let palettes = [
-            [Color(red: 0.09, green: 0.66, blue: 0.70), Color(red: 0.06, green: 0.51, blue: 0.63)],
-            [Color(red: 0.86, green: 0.61, blue: 0.12), Color(red: 0.76, green: 0.42, blue: 0.08)],
-            [Color(red: 0.65, green: 0.31, blue: 0.84), Color(red: 0.45, green: 0.22, blue: 0.73)],
-            [Color(red: 0.82, green: 0.26, blue: 0.57), Color(red: 0.52, green: 0.20, blue: 0.73)]
-        ]
-        let colors = palettes[tintIndex % palettes.count]
-        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+private func shellOut(_ path: String, _ args: [String]) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = Pipe()
+    guard (try? p.run()) != nil else { return "" }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+private func hostPid(for session: AgentSession) -> pid_t? {
+    let binary: String
+    switch session.product {
+    case .claude: binary = "claude"
+    case .codex: binary = "codex"
+    case .cursor: binary = "cursor-agent"
     }
+    var pids: [pid_t] = []
+    for line in shellOut("/bin/ps", ["-axo", "pid=,comm="]).split(whereSeparator: \.isNewline) {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard let sp = t.firstIndex(of: " "), let pid = pid_t(t[..<sp]) else { continue }
+        let comm = t[t.index(after: sp)...].trimmingCharacters(in: .whitespaces)
+        if URL(fileURLWithPath: comm).lastPathComponent == binary { pids.append(pid) }
+    }
+    guard let cwd = session.cwd, pids.count > 1 else { return pids.first }
+    // lsof -Fpn emits "p<pid>" then "n<cwd>" pairs; pick the pid whose cwd matches.
+    let out = shellOut("/usr/sbin/lsof",
+                       ["-a", "-d", "cwd", "-p", pids.map(String.init).joined(separator: ","), "-Fpn"])
+    var current: pid_t?
+    for line in out.split(whereSeparator: \.isNewline) {
+        if line.hasPrefix("p") { current = pid_t(line.dropFirst()) }
+        else if line.hasPrefix("n"), String(line.dropFirst()) == cwd, let match = current { return match }
+    }
+    return pids.first // ponytail: several sessions in one cwd → first one wins
+}
+
+private func owningApp(of pid: pid_t) -> NSRunningApplication? {
+    var p = pid
+    for _ in 0..<15 {
+        if let app = NSRunningApplication(processIdentifier: p), app.activationPolicy == .regular {
+            return app
+        }
+        let ppid = shellOut("/bin/ps", ["-o", "ppid=", "-p", "\(p)"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let next = pid_t(ppid), next > 1 else { return nil }
+        p = next
+    }
+    return nil
 }
 
 private struct MetricPill: View {

@@ -26,6 +26,11 @@ final class LimitsEngine {
         cursorProviders.forEach { $0.start() }
     }
 
+    // Poked when the notch opens; providers self-throttle.
+    func refreshNow() {
+        claudeProviders.forEach { $0.refreshNow() }
+    }
+
     private func merge(_ acc: AccountUsage) {
         accounts[acc.id] = acc
         let sorted = accounts.values.sorted {

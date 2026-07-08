@@ -140,28 +140,10 @@ final class ApprovalServer {
         return result
     }
 
+    // The hook owns the harness-specific output shapes; we hand it just the verdict.
     private func writeDecision(_ fd: Int32, request: ApprovalRequest, decision: ApprovalDecision) {
         let effective: ApprovalDecision = decision == .always ? .allow : decision
-        let payload: [String: Any]
-        switch request.product {
-        case .claude:
-            payload = [
-                "decision": effective.rawValue,
-                "hookSpecificOutput": [
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": effective.rawValue,
-                ],
-            ]
-        case .cursor:
-            payload = [
-                "decision": effective.rawValue,
-                "permission": effective.rawValue,
-                "continue": true,
-            ]
-        case .codex:
-            payload = ["decision": effective.rawValue]
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: ["decision": effective.rawValue]) else { return }
         var out = data
         out.append(0x0A)
         _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }
@@ -179,7 +161,9 @@ final class ApprovalServer {
         } else {
             sessionTitle = product.rawValue.capitalized
         }
-        let alwaysKey = "\(product.rawValue):\(tool):\(summary.prefix(40))"
+        // Key on the whole command, not a prefix: two different commands sharing the
+        // first N chars must not auto-allow each other once one is "always allowed".
+        let alwaysKey = "\(product.rawValue):\(tool):\(summary)"
         return ApprovalRequest(
             id: obj["id"] as? String ?? UUID().uuidString,
             product: product,
