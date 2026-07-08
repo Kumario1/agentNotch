@@ -53,7 +53,7 @@ final class NotchController {
     private let settings: SettingsController
     private let accountSwitcher: ClaudeAccountSwitcher
 
-    private var metrics = NotchMetrics(notchWidth: 0, collapsed: .zero, expanded: .zero)
+    private var metrics = NotchMetrics(notchWidth: 0, collapsed: .zero, expanded: .zero, expandedDetail: .zero)
     private var panelRect: CGRect = .zero
     private var collapseWork: DispatchWorkItem?
 
@@ -72,6 +72,19 @@ final class NotchController {
     func start() {
         approvalServer.start()
         observeApprovals()
+        observeSelection()
+    }
+
+    // Resize the hover area the moment a session is opened or closed.
+    private func observeSelection() {
+        withObservationTracking {
+            _ = ui.selectedSessionID
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                self?.updateTracking()
+                self?.observeSelection()
+            }
+        }
     }
 
     func show() {
@@ -198,17 +211,28 @@ final class NotchController {
         // height is fixed — not scaled by account count. A pending approval needs a bit more.
         let hasApproval = !store.pendingApprovals.isEmpty
         let expanded = CGSize(width: max(540, collapsed.width + 140), height: hasApproval ? 440 : 380)
-        metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed, expanded: expanded)
-        panelRect = CGRect(x: notch.midX - expanded.width / 2, y: notch.maxY - expanded.height,
-                           width: expanded.width, height: expanded.height)
+        // Opening one session grows the notch taller to show its full detail.
+        let expandedDetail = CGSize(width: expanded.width, height: 680)
+        metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed,
+                               expanded: expanded, expandedDetail: expandedDetail)
+        // The window hosts the tallest state; shorter states pin to the top edge.
+        let winH = max(expanded.height, expandedDetail.height)
+        panelRect = CGRect(x: notch.midX - expanded.width / 2, y: notch.maxY - winH,
+                           width: expanded.width, height: winH)
     }
 
+    // Hover area tracks the visible shape so the transparent space below it isn't a
+    // dead zone. Grows with the detail view; re-run when a session is opened/closed.
     private func updateTracking() {
         let b = hover.bounds
-        hover.activeRect = ui.expanded ? b : CGRect(
-            x: (b.width - metrics.collapsed.width) / 2,
-            y: b.height - metrics.collapsed.height,
-            width: metrics.collapsed.width, height: metrics.collapsed.height)
+        let size: CGSize
+        if ui.expanded {
+            size = ui.selectedSessionID != nil ? metrics.expandedDetail : metrics.expanded
+        } else {
+            size = metrics.collapsed
+        }
+        hover.activeRect = CGRect(x: (b.width - size.width) / 2, y: b.height - size.height,
+                                  width: size.width, height: size.height)
     }
 
     // MARK: - Hover expand / collapse

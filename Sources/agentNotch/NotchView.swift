@@ -6,6 +6,7 @@ struct NotchMetrics: Equatable {
     var notchWidth: CGFloat
     var collapsed: CGSize
     var expanded: CGSize
+    var expandedDetail: CGSize   // taller — the notch grows to reveal one session
 }
 
 // UI-only state; separate from usage data so hover doesn't touch the store.
@@ -56,6 +57,10 @@ private let claudeOrange = Color(red: 0.90, green: 0.56, blue: 0.36) // asterisk
 private let codexAccent = Color(white: 0.78)
 private let cursorAccent = Color(red: 0.55, green: 0.63, blue: 1.0)
 private let dangerRed = Color(red: 0.90, green: 0.28, blue: 0.28)
+
+// One spring drives both the notch growth and the list↔detail swap so they move
+// together — mismatched curves are what made the open feel janky.
+private let cardSpring = Animation.spring(response: 0.42, dampingFraction: 0.88)
 
 // Remaining percent: low remaining is danger; otherwise keep product color.
 private func usageColor(_ fraction: Double, _ product: Product) -> Color {
@@ -113,6 +118,9 @@ struct NotchRootView: View {
         // Expansion is hover-driven only. A pending approval no longer force-expands;
         // instead the resting (collapsed) notch bounces for attention until opened.
         let exp = ui.expanded
+        // A selected session grows the notch taller so the whole session is visible.
+        let detail = exp && ui.selectedSessionID != nil
+        let size = exp ? (detail ? m.expandedDetail : m.expanded) : m.collapsed
         let shouldBounce = store.currentApproval != nil && !exp
         ZStack(alignment: .top) {
             BehindWindowBlur()
@@ -141,10 +149,10 @@ struct NotchRootView: View {
                     .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
             }
         }
-        .frame(width: exp ? m.expanded.width : m.collapsed.width,
-               height: exp ? m.expanded.height : m.collapsed.height)
+        .frame(width: size.width, height: size.height)
         .clipShape(NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13))
         .animation(.snappy(duration: 0.28), value: exp)
+        .animation(cardSpring, value: detail)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Attention "bounce": the notch hugs the top screen edge, so it can't move up.
         // Instead it swells downward/outward from the pinned top edge and pulses back.
@@ -463,9 +471,9 @@ private struct ExpandedContent: View {
                 ZStack(alignment: .top) {
                     if let selected {
                         SessionControl(session: selected) {
-                            withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = nil }
+                            withAnimation(cardSpring) { ui.selectedSessionID = nil }
                         }
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                     } else if visibleSessions.isEmpty {
                         EmptySessions()
                             .transition(.opacity)
@@ -481,7 +489,7 @@ private struct ExpandedContent: View {
                                     ) {
                                         // Open the session where it lives: expand the card
                                         // and bring the hosting terminal/app forward.
-                                        withAnimation(.smooth(duration: 0.32)) { ui.selectedSessionID = session.id }
+                                        withAnimation(cardSpring) { ui.selectedSessionID = session.id }
                                         focusSession(session)
                                     }
                                     Divider().overlay(.white.opacity(0.09))
@@ -491,7 +499,7 @@ private struct ExpandedContent: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                     }
                 }
-                .animation(.smooth(duration: 0.32), value: ui.selectedSessionID)
+                .animation(cardSpring, value: ui.selectedSessionID)
             }
         }
         .padding(.horizontal, 28)
@@ -825,60 +833,83 @@ private struct SessionControl: View {
     @State private var confirmingStop = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Capsule()
-                .fill(.white.opacity(0.22))
-                .frame(width: 3, height: 28)
-                .frame(maxWidth: .infinity)
-            HStack(spacing: 12) {
-                productTile(session.product, size: 42)
-                VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 13) {
+            // Back to the list.
+            Button(action: close) {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
+                    Text("Sessions").font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(.white.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+
+            // Hero: tile · title / project · live status.
+            HStack(spacing: 13) {
+                productTile(session.product, size: 44)
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(verbatim: session.title)
-                            .font(.system(size: 17, weight: .bold))
+                            .font(.system(size: 18, weight: .bold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                         if let model = shortModel(session.model) {
                             Text(verbatim: model)
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .foregroundStyle(peach)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(peach.opacity(0.14)))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(peach.opacity(0.16)))
                         }
                     }
-                    Text(verbatim: session.detail)
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(peach)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if let cwd = session.cwd {
+                        Text(verbatim: prettyPath(cwd))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .lineLimit(1).truncationMode(.head)
+                    }
                 }
-                Spacer()
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.72))
+                Spacer(minLength: 8)
+                StatusBadge(active: session.isActive)
             }
 
-            HStack(spacing: 10) {
-                if session.inputTokens + session.outputTokens > 0 {
-                    MetricPill(label: "IN", value: compactCount(session.inputTokens))
-                    MetricPill(label: "OUT", value: compactCount(session.outputTokens))
-                }
+            // What it's doing right now.
+            Text(verbatim: session.detail)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(peach)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 11).fill(.black.opacity(0.28)))
+
+            // Stat tiles.
+            HStack(spacing: 8) {
+                StatTile(label: "IN", value: compactCount(session.inputTokens))
+                StatTile(label: "OUT", value: compactCount(session.outputTokens))
                 if let cost = estimatedCost(session) {
-                    MetricPill(label: "COST", value: cost)
+                    StatTile(label: "COST", value: cost)
                 }
                 TimelineView(.periodic(from: .now, by: 15)) { _ in
-                    MetricPill(label: "AGE", value: shortAge(session.lastActivity))
+                    StatTile(label: "AGE", value: shortAge(session.lastActivity))
                 }
             }
 
-            if !session.todos.isEmpty { TodoList(todos: session.todos) }
-            if !session.activity.isEmpty { ActivityFeed(activity: session.activity) }
+            // Tasks + activity — fills the extra height the notch gains on open.
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !session.todos.isEmpty {
+                        sectionLabel("TASKS")
+                        TodoList(todos: session.todos)
+                    }
+                    if !session.activity.isEmpty {
+                        sectionLabel("ACTIVITY")
+                        ActivityFeed(activity: session.activity)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
+            // Actions.
             HStack(spacing: 8) {
                 ControlButton(icon: "macwindow", title: "Focus") { focusSession(session) }
                 ControlButton(icon: "folder", title: "Open") {
@@ -888,37 +919,80 @@ private struct SessionControl: View {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.transcriptPath)])
                     }
                 }
-                ControlButton(icon: "doc.text.magnifyingglass", title: "Transcript") {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.transcriptPath)])
-                }
-            }
-            HStack(spacing: 8) {
-                ControlButton(icon: "doc.on.doc", title: "Copy ID") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(session.sessionID ?? session.id, forType: .string)
-                }
                 Button {
                     if confirmingStop { stopSession(session); confirmingStop = false }
                     else { confirmingStop = true }
                 } label: {
-                    Label(confirmingStop ? "Confirm stop?" : "Interrupt", systemImage: "stop.circle")
+                    Label(confirmingStop ? "Confirm?" : "Interrupt", systemImage: "stop.circle")
                         .font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(confirmingStop ? .white : dangerRed)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(confirmingStop ? dangerRed : dangerRed.opacity(0.14)))
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(confirmingStop ? dangerRed : dangerRed.opacity(0.16)))
             }
         }
-        .padding(14)
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.white.opacity(0.06))
         )
         .onChange(of: session.id) { _, _ in confirmingStop = false }
     }
+}
+
+// Pulsing dot + label: peach "Working" while mid-turn, dim "Idle" otherwise.
+private struct StatusBadge: View {
+    let active: Bool
+    @State private var pulse = false
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(active ? peach : .white.opacity(0.35))
+                .frame(width: 6, height: 6)
+                .opacity(active && pulse ? 0.35 : 1)
+                .animation(active ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
+                           value: pulse)
+            Text(active ? "Working" : "Idle")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(active ? peach : .white.opacity(0.45))
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(Capsule().fill((active ? peach : Color.white).opacity(active ? 0.14 : 0.06)))
+        .onAppear { pulse = active }
+        .onChange(of: active) { _, a in pulse = a }
+    }
+}
+
+private struct StatTile: View {
+    let label: String
+    let value: String
+    var body: some View {
+        VStack(spacing: 3) {
+            Text(verbatim: value)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(verbatim: label)
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+    }
+}
+
+private func sectionLabel(_ t: String) -> some View {
+    Text(verbatim: t)
+        .font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.5)
+        .foregroundStyle(.white.opacity(0.35))
+}
+
+private func prettyPath(_ p: String) -> String {
+    let home = NSHomeDirectory()
+    return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
 }
 
 // Live checklist — appears only when the session has TodoWrite data (tasks enabled).
@@ -958,7 +1032,7 @@ private struct ActivityFeed: View {
     let activity: [ActivityEntry]
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(activity.suffix(6).reversed().enumerated()), id: \.offset) { _, entry in
+            ForEach(Array(activity.suffix(16).reversed().enumerated()), id: \.offset) { _, entry in
                 HStack(spacing: 8) {
                     Text(verbatim: shortAge(entry.at))
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -1126,10 +1200,12 @@ private func compactCount(_ n: Int) -> String {
 // Rough per-1M-token USD prices. Hardcoded and will go stale — a tunable knob, not an
 // engine. ponytail: applied to the blended input count (incl. cheap cache reads), so the
 // figure over-estimates a little — hence the "~". Split cache tokens out for precision.
+// Per-MTok base input/output rates (current Anthropic tiers; cache multipliers
+// handled in AgentSession.estimatedCostUSD).
 private let modelPrices: [(match: String, inPer1M: Double, outPer1M: Double)] = [
-    ("opus", 15, 75),
+    ("opus", 5, 25),
     ("sonnet", 3, 15),
-    ("haiku", 0.8, 4),
+    ("haiku", 1, 5),
     ("gpt-5", 1.25, 10),
     ("o3", 2, 8),
 ]
@@ -1146,8 +1222,7 @@ private func estimatedCost(_ session: AgentSession) -> String? {
     guard let raw = session.model?.lowercased(),
           session.inputTokens + session.outputTokens > 0,
           let p = modelPrices.first(where: { raw.contains($0.match) }) else { return nil }
-    let cost = Double(session.inputTokens) / 1_000_000 * p.inPer1M
-             + Double(session.outputTokens) / 1_000_000 * p.outPer1M
+    let cost = session.estimatedCostUSD(inPer1M: p.inPer1M, outPer1M: p.outPer1M)
     return String(format: "~$%.2f", cost)
 }
 

@@ -8,8 +8,10 @@ struct AgentSession: Equatable, Identifiable {
     var title: String
     var detail: String = "Working"
     var model: String? = nil
-    var inputTokens = 0
+    var inputTokens = 0          // total in: fresh + cache-creation + cache-read
     var outputTokens = 0
+    var cacheReadTokens = 0      // billed ~0.1x input
+    var cacheCreationTokens = 0  // billed ~1.25x input (5-min write)
     var lastActivity: Date
     var isActive = false        // mid-turn: the agent is working right now
     var isAlive = false         // the hosting terminal/CLI process is still open
@@ -27,6 +29,19 @@ struct TodoItem: Equatable {
 struct ActivityEntry: Equatable {
     let at: Date
     let text: String
+}
+
+extension AgentSession {
+    // Rough $ cost from token counts. Cache reads bill ~0.1x input and 5-min
+    // cache writes ~1.25x (Anthropic prompt-caching pricing); charging all input
+    // tokens at the full rate over-counts by ~10x on cache-heavy sessions.
+    func estimatedCostUSD(inPer1M: Double, outPer1M: Double) -> Double {
+        let fresh = max(0, inputTokens - cacheReadTokens - cacheCreationTokens)
+        return Double(fresh) / 1_000_000 * inPer1M
+            + Double(cacheCreationTokens) / 1_000_000 * inPer1M * 1.25
+            + Double(cacheReadTokens) / 1_000_000 * inPer1M * 0.1
+            + Double(outputTokens) / 1_000_000 * outPer1M
+    }
 }
 
 enum ApprovalDecision: String, Equatable, Codable {

@@ -43,9 +43,11 @@ enum SessionParsing {
 
     private static func applyClaude(_ obj: [String: Any], message: [String: Any]?, to s: inout AgentSession) {
         if let usage = message?["usage"] as? [String: Any] {
-            s.inputTokens += int(usage["input_tokens"])
-                + int(usage["cache_creation_input_tokens"])
-                + int(usage["cache_read_input_tokens"])
+            let cacheCreate = int(usage["cache_creation_input_tokens"])
+            let cacheRead = int(usage["cache_read_input_tokens"])
+            s.inputTokens += int(usage["input_tokens"]) + cacheCreate + cacheRead
+            s.cacheCreationTokens += cacheCreate
+            s.cacheReadTokens += cacheRead
             s.outputTokens += int(usage["output_tokens"])
         }
         if let m = message?["model"] as? String, !m.isEmpty { s.model = m }
@@ -304,11 +306,11 @@ enum SessionParsing {
         return items.isEmpty ? nil : items
     }
 
-    // Ring buffer (~8) of activity transitions — feeds the detail-card timeline.
+    // Ring buffer of activity transitions — feeds the detail-card timeline.
     private static func appendActivity(_ s: inout AgentSession, _ text: String) {
         guard !text.isEmpty, text != s.activity.last?.text else { return }
         s.activity.append(ActivityEntry(at: s.lastActivity, text: text))
-        if s.activity.count > 8 { s.activity.removeFirst() }
+        if s.activity.count > 24 { s.activity.removeFirst() }
     }
 
     private static func text(_ content: Any?) -> String? {

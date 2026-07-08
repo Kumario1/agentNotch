@@ -120,6 +120,22 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(out.map(\.id), ["on"], "Codex has no per-session liveness → show while working")
     }
 
+    func testEstimatedCostChargesCacheReadsCheaply() {
+        // Screenshot case: 66.4M "input" is almost all cache reads. Charging every
+        // input token at the full rate produced ~$1045; cache-aware pricing is ~$79.
+        var s = SessionParsing.empty(path: "/tmp/s.jsonl", product: .claude, modifiedAt: .distantPast)
+        s.inputTokens = 66_400_000
+        s.cacheReadTokens = 60_000_000
+        s.cacheCreationTokens = 400_000
+        s.outputTokens = 657_000
+
+        // Opus 4.8: $5 in / $25 out. fresh=6M → 30 + cacheCreate 0.4M*5*1.25=2.5
+        //          + cacheRead 60M*5*0.1=30 + out 0.657M*25=16.4  ≈ $78.9
+        let cost = s.estimatedCostUSD(inPer1M: 5, outPer1M: 25)
+        XCTAssertEqual(cost, 78.9, accuracy: 1.0)
+        XCTAssertLessThan(cost, 100, "cache reads must not be billed at the full input rate")
+    }
+
     func testCursorSessionParsing() {
         var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
         SessionParsing.apply(Data("""
