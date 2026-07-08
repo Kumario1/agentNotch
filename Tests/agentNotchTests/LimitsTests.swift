@@ -24,6 +24,108 @@ final class LimitsTests: XCTestCase {
         XCTAssertEqual(c.claudeDirs.map(\.lastPathComponent), [".claude"])
     }
 
+    func testConfigLaunchAtLoginRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentnotch-cfg-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("config.json").path
+
+        var c = AppConfig.parse(nil)
+        c.launchAtLogin = true
+        c.save(to: path)
+        let loaded = AppConfig.load(configPath: path)
+        XCTAssertTrue(loaded.launchAtLogin)
+
+        c.launchAtLogin = false
+        c.save(to: path)
+        XCTAssertFalse(AppConfig.parse(FileManager.default.contents(atPath: path)).launchAtLogin)
+    }
+
+    func testLaunchAtLoginInstallHintForDMGAndBareBinary() {
+        XCTAssertNotNil(LaunchAtLogin.installHint(bundlePath: "/Volumes/agentNotch/agentNotch.app"))
+        XCTAssertNotNil(LaunchAtLogin.installHint(bundlePath: "/private/var/folders/xx/AppTranslocation/abc/agentNotch.app"))
+        XCTAssertNotNil(LaunchAtLogin.installHint(bundlePath: "/tmp/.build/release/agentNotch"))
+        XCTAssertNil(LaunchAtLogin.installHint(bundlePath: "/Applications/agentNotch.app"))
+    }
+
+    // MARK: Account discovery
+
+    func testDiscoverClaudeFindsDefaultAndSiblingAccountDirs() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentnotch-discover-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let claude = home.appendingPathComponent(".claude", isDirectory: true)
+        let work = home.appendingPathComponent("claude-work", isDirectory: true)
+        let decoy = home.appendingPathComponent("notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        try Data(#"{"oauthAccount":{"emailAddress":"a@x.com"}}"#.utf8)
+            .write(to: claude.appendingPathComponent(".claude.json"))
+        try Data(#"{"claudeAiOauth":{"accessToken":"t"}}"#.utf8)
+            .write(to: work.appendingPathComponent(".credentials.json"))
+        try Data("hello".utf8).write(to: decoy.appendingPathComponent("readme.txt"))
+
+        let found = AccountDiscovery.claudeDirs(home: home)
+        XCTAssertEqual(Set(found.map(\.lastPathComponent)), [".claude", "claude-work"])
+    }
+
+    func testDiscoverCodexAndCursorOnlyWhenPresent() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentnotch-discover-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codex = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codex, withIntermediateDirectories: true)
+
+        XCTAssertEqual(AccountDiscovery.codexDirs(home: home).map(\.lastPathComponent), [".codex"])
+        XCTAssertEqual(AccountDiscovery.cursorDirs(home: home), [])
+    }
+
+    func testLoadWithoutConfigFileMergesDiscoveryAndPersists() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentnotch-load-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let configPath = home.appendingPathComponent(".agentnotch.json").path
+        let work = home.appendingPathComponent("claude-work", isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        try Data(#"{"claudeAiOauth":{"accessToken":"t"}}"#.utf8)
+            .write(to: work.appendingPathComponent(".credentials.json"))
+        try FileManager.default.createDirectory(
+            at: home.appendingPathComponent(".codex", isDirectory: true),
+            withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: home.appendingPathComponent(".cursor", isDirectory: true),
+            withIntermediateDirectories: true)
+
+        let c = AppConfig.load(configPath: configPath, home: home)
+        XCTAssertTrue(c.claudeDirs.contains { $0.lastPathComponent == "claude-work" })
+        XCTAssertEqual(c.codexDirs.map(\.lastPathComponent), [".codex"])
+        XCTAssertEqual(c.cursorDirs.map(\.lastPathComponent), [".cursor"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: configPath), "first launch should persist discovery")
+    }
+
+    func testLoadWithExistingConfigDoesNotOverwriteDirs() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentnotch-load-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let configPath = home.appendingPathComponent(".agentnotch.json").path
+        let only = home.appendingPathComponent("only-claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: only, withIntermediateDirectories: true)
+        let json = Data(#"{"claude":["\#(only.path)"],"codex":[],"cursor":[]}"#.utf8)
+        try json.write(to: URL(fileURLWithPath: configPath))
+        // Extra discoverable dir that must NOT be auto-added when config already exists.
+        let extra = home.appendingPathComponent("claude-extra", isDirectory: true)
+        try FileManager.default.createDirectory(at: extra, withIntermediateDirectories: true)
+        try Data(#"{"claudeAiOauth":{"accessToken":"t"}}"#.utf8)
+            .write(to: extra.appendingPathComponent(".credentials.json"))
+
+        let c = AppConfig.load(configPath: configPath, home: home)
+        XCTAssertEqual(c.claudeDirs.map(\.path), [only.path])
+        XCTAssertEqual(c.codexDirs, [])
+        XCTAssertEqual(c.cursorDirs, [])
+    }
+
     // MARK: ISO helper
 
     func testParseISO8601BothVariants() {

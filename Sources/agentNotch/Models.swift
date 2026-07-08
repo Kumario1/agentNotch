@@ -101,6 +101,45 @@ private let isoFrac: ISO8601DateFormatter = {
 private let isoPlain = ISO8601DateFormatter()
 func parseISO8601(_ s: String) -> Date? { isoFrac.date(from: s) ?? isoPlain.date(from: s) }
 
+// MARK: - First-launch account discovery
+
+enum AccountDiscovery {
+    /// Claude account dirs: `~/.claude` plus any home child that looks like a Claude config
+    /// (has `.credentials.json` or `.claude.json`).
+    static func claudeDirs(home: URL, fm: FileManager = .default) -> [URL] {
+        var found: [URL] = []
+        let defaultDir = home.appendingPathComponent(".claude", isDirectory: true)
+        if fm.fileExists(atPath: defaultDir.path) { found.append(defaultDir) }
+
+        guard let kids = try? fm.contentsOfDirectory(
+            at: home, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        else { return found }
+
+        for url in kids {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if url.path == defaultDir.path { continue }
+            if isClaudeAccountDir(url, fm: fm) { found.append(url) }
+        }
+        return found.sorted { $0.path < $1.path }
+    }
+
+    static func codexDirs(home: URL, fm: FileManager = .default) -> [URL] {
+        let dir = home.appendingPathComponent(".codex", isDirectory: true)
+        return fm.fileExists(atPath: dir.path) ? [dir] : []
+    }
+
+    static func cursorDirs(home: URL, fm: FileManager = .default) -> [URL] {
+        let dir = home.appendingPathComponent(".cursor", isDirectory: true)
+        return fm.fileExists(atPath: dir.path) ? [dir] : []
+    }
+
+    private static func isClaudeAccountDir(_ url: URL, fm: FileManager) -> Bool {
+        fm.fileExists(atPath: url.appendingPathComponent(".credentials.json").path)
+            || fm.fileExists(atPath: url.appendingPathComponent(".claude.json").path)
+    }
+}
+
 // MARK: - Config: which config dirs are accounts
 
 struct AppConfig: Equatable {
@@ -137,11 +176,27 @@ struct AppConfig: Equatable {
             launchAtLogin: launchAtLogin)
     }
 
-    static func load() -> AppConfig {
-        parse(FileManager.default.contents(atPath: configPath))
+    /// Load config. When `~/.agentnotch.json` is missing, discover local account dirs,
+    /// persist them, and return that config so first launch works with no setup.
+    static func load(
+        configPath: String = AppConfig.configPath,
+        home: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    ) -> AppConfig {
+        if let data = FileManager.default.contents(atPath: configPath) {
+            return parse(data)
+        }
+        var discovered = parse(nil)
+        let claude = AccountDiscovery.claudeDirs(home: home)
+        let codex = AccountDiscovery.codexDirs(home: home)
+        let cursor = AccountDiscovery.cursorDirs(home: home)
+        if !claude.isEmpty { discovered.claudeDirs = claude }
+        if !codex.isEmpty { discovered.codexDirs = codex }
+        if !cursor.isEmpty { discovered.cursorDirs = cursor }
+        discovered.save(to: configPath)
+        return discovered
     }
 
-    func save() {
+    func save(to path: String = AppConfig.configPath) {
         let obj: [String: Any] = [
             "claude": claudeDirs.map(\.path),
             "codex": codexDirs.map(\.path),
@@ -151,7 +206,7 @@ struct AppConfig: Equatable {
             "launchAtLogin": launchAtLogin,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
-        try? data.write(to: URL(fileURLWithPath: Self.configPath), options: .atomic)
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 }
 

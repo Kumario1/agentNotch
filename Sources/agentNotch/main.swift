@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = NotchController(settings: settings, claudeDirs: config.claudeDirs)
         controller.start()
         HookInstaller.sync(config: config)
+        // Re-register after reinstall/move; ad-hoc rebuilds invalidate prior BTM entries.
+        LaunchAtLogin.sync(enabled: config.launchAtLogin)
 
         sessions = SessionEngine(config: config, store: controller.store)
         controller.store.loadOrganize()

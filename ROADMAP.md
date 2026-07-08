@@ -2,7 +2,7 @@
 
 **Goal:** a buttery-smooth macOS notch app that surfaces coding-agent sessions, usage limits, and permission prompts — local-only, Apple Silicon, macOS 14+. No Electron, no polling, no jank.
 
-**Non-goals (for now):** dev-server port watcher · packaged `.app` distribution.
+**Non-goals (for now):** dev-server port watcher.
 
 ---
 
@@ -56,7 +56,7 @@ Claude via OAuth usage endpoint; Codex via `rate_limits` in session rollouts; pe
 - Sections: watched dirs (add/remove), approval hook install status, launch at login (`SMAppService`), about footer.
 - Dir changes apply on next launch (documented in-UI).
 
-**Acceptance:** gear opens settings; toggles persist; hook install/uninstall reflected in status labels.
+**Acceptance:** gear opens settings; toggles persist; hook install/uninstall reflected in status labels; launch-at-login shows `SMAppService` status (including Login Items approval) and re-syncs on launch from the packaged `.app`.
 
 ---
 
@@ -87,9 +87,17 @@ Claude via OAuth usage endpoint; Codex via `rate_limits` in session rollouts; pe
 
 ---
 
+## Step 10 — Packaged `.app` + first-launch discovery (done)
+
+- `scripts/package-app.sh` builds `dist/agentNotch.app` with both binaries, SPM
+  resource bundle, and `LSUIElement` Info.plist.
+- `scripts/sign-and-notarize.sh` / `scripts/make-dmg.sh` for Developer ID + DMG.
+- First launch with no `~/.agentnotch.json` auto-discovers Claude/Codex/Cursor
+  dirs under `$HOME` and persists them.
+
 ## Later (explicitly deferred)
 
-Dev-server port watcher (3000–9999) · tool-call timelines per session · stuck-session alerts · packaged `.app` with bundled hook binary · Codex end-to-end approvals.
+Dev-server port watcher (3000–9999) · tool-call timelines per session · stuck-session alerts · Codex end-to-end approvals.
 
 ## Step 6 — Claude account switching (done)
 
