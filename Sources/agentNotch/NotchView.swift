@@ -111,7 +111,7 @@ struct NotchRootView: View {
     var ui: NotchState
     var m: NotchMetrics
     var onOpenSettings: () -> Void = {}
-    var onApprovalDecision: (String, ApprovalDecision, String?) -> Void = { _, _, _ in }
+    var onApprovalDecision: (String, ApprovalDecision, String?, [String: String]?) -> Void = { _, _, _, _ in }
     var onSwitchClaudeAccount: (String) -> Void = { _ in }
 
     var body: some View {
@@ -397,7 +397,7 @@ private struct ExpandedContent: View {
     var store: UsageStore
     var ui: NotchState
     var onOpenSettings: () -> Void
-    var onApprovalDecision: (String, ApprovalDecision, String?) -> Void
+    var onApprovalDecision: (String, ApprovalDecision, String?, [String: String]?) -> Void
     var onSwitchClaudeAccount: (String) -> Void
 
     var body: some View {
@@ -659,25 +659,54 @@ private struct EmptySessions: View {
 private struct ApprovalCard: View {
     let request: ApprovalRequest
     var ui: NotchState
-    let onDecision: (String, ApprovalDecision, String?) -> Void
+    let onDecision: (String, ApprovalDecision, String?, [String: String]?) -> Void
     @State private var showFeedback = false
     @State private var reason = ""
+    @State private var selections: [Int: Set<String>] = [:]
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                productTile(request.product, size: 28)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(verbatim: request.toolName)
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text(verbatim: request.sessionTitle)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.45))
-                }
-                Spacer()
+            header
+            if request.questions.isEmpty {
+                genericApproval
+            } else {
+                questionApproval
             }
+            denyControls
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.white.opacity(0.10))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(peach.opacity(0.35), lineWidth: 1))
+        )
+        .onChange(of: showFeedback) { _, v in ui.collectingFeedback = v }
+        .onChange(of: request.id) { _, _ in
+            showFeedback = false
+            reason = ""
+            selections = [:]
+        }
+        .onDisappear { ui.collectingFeedback = false }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            productTile(request.product, size: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(verbatim: request.toolName)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(verbatim: request.sessionTitle)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer()
+        }
+    }
+
+    private var genericApproval: some View {
+        VStack(alignment: .leading, spacing: 14) {
             Text(verbatim: request.summary)
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.82))
@@ -688,53 +717,175 @@ private struct ApprovalCard: View {
 
             HStack(spacing: 8) {
                 ApprovalButton(title: "Always Allow", shortcut: "⌥A", style: .outline) {
-                    onDecision(request.id, .always, nil)
+                    onDecision(request.id, .always, nil, nil)
                 }
                 ApprovalButton(title: "Allow", shortcut: "⌘A", style: .primary) {
-                    onDecision(request.id, .allow, nil)
+                    onDecision(request.id, .allow, nil, nil)
                 }
-            }
-            if showFeedback {
-                TextField("Why deny? Claude will see this.", text: $reason, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white)
-                    .lineLimit(1...3)
-                    .padding(9)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(.black.opacity(0.35)))
-                    .focused($fieldFocused)
-                    .onSubmit(sendDeny)
-                HStack(spacing: 8) {
-                    ApprovalButton(title: "Cancel", shortcut: "", style: .outline) {
-                        showFeedback = false; reason = ""
-                    }
-                    ApprovalButton(title: "Send deny", shortcut: "⏎", style: .primary, action: sendDeny)
-                }
-            } else {
-                Button { showFeedback = true; fieldFocused = true } label: {
-                    Text("Deny with feedback")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.42))
-                }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity)
             }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.white.opacity(0.10))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(peach.opacity(0.35), lineWidth: 1))
-        )
-        .onChange(of: showFeedback) { _, v in ui.collectingFeedback = v }
-        .onChange(of: request.id) { _, _ in showFeedback = false; reason = "" }
-        .onDisappear { ui.collectingFeedback = false }
+    }
+
+    private var questionApproval: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(request.questions.indices, id: \.self) { index in
+                let question = request.questions[index]
+                VStack(alignment: .leading, spacing: 9) {
+                    if !question.header.isEmpty {
+                        Text(verbatim: question.header)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(peach)
+                            .lineLimit(1)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(peach.opacity(0.16)))
+                    }
+                    Text(verbatim: question.question)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.94))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(spacing: 7) {
+                        ForEach(question.options, id: \.label) { option in
+                            QuestionOptionRow(option: option, selected: isSelected(option, questionIndex: index)) {
+                                choose(option, for: question, questionIndex: index)
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.25)))
+            }
+
+            if request.questions.count > 1 || request.questions.contains(where: \.multiSelect) {
+                ApprovalButton(
+                    title: "Submit",
+                    shortcut: "",
+                    style: .primary,
+                    disabled: !allQuestionsAnswered,
+                    action: submitQuestions)
+            }
+        }
+    }
+
+    @ViewBuilder private var denyControls: some View {
+        if showFeedback {
+            TextField("Why deny? Claude will see this.", text: $reason, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(.white)
+                .lineLimit(1...3)
+                .padding(9)
+                .background(RoundedRectangle(cornerRadius: 8).fill(.black.opacity(0.35)))
+                .focused($fieldFocused)
+                .onSubmit(sendDeny)
+            HStack(spacing: 8) {
+                ApprovalButton(title: "Cancel", shortcut: "", style: .outline) {
+                    showFeedback = false; reason = ""
+                }
+                ApprovalButton(title: "Send deny", shortcut: "⏎", style: .primary, action: sendDeny)
+            }
+        } else {
+            Button { showFeedback = true; fieldFocused = true } label: {
+                Text("Deny with feedback")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var allQuestionsAnswered: Bool {
+        request.questions.indices.allSatisfy { index in
+            !(selections[index] ?? []).isEmpty
+        }
+    }
+
+    private func isSelected(_ option: ApprovalOption, questionIndex: Int) -> Bool {
+        selections[questionIndex]?.contains(option.label) ?? false
+    }
+
+    private func choose(_ option: ApprovalOption, for question: ApprovalQuestion, questionIndex: Int) {
+        if request.questions.count == 1, !question.multiSelect {
+            onDecision(request.id, .allow, nil, [question.question: option.label])
+            return
+        }
+
+        var selected = selections[questionIndex] ?? []
+        if question.multiSelect {
+            if selected.contains(option.label) {
+                selected.remove(option.label)
+            } else {
+                selected.insert(option.label)
+            }
+        } else {
+            selected = [option.label]
+        }
+        selections[questionIndex] = selected
+    }
+
+    private func submitQuestions() {
+        guard allQuestionsAnswered else { return }
+        onDecision(request.id, .allow, nil, answersMap())
+    }
+
+    private func answersMap() -> [String: String] {
+        var answers: [String: String] = [:]
+        for index in request.questions.indices {
+            let question = request.questions[index]
+            let selected = selections[index] ?? []
+            answers[question.question] = question.options
+                .map(\.label)
+                .filter { selected.contains($0) }
+                .joined(separator: ", ")
+        }
+        return answers
     }
 
     private func sendDeny() {
-        onDecision(request.id, .deny, reason.isEmpty ? nil : reason)
+        onDecision(request.id, .deny, reason.isEmpty ? nil : reason, nil)
         showFeedback = false
         reason = ""
+    }
+}
+
+private struct QuestionOptionRow: View {
+    let option: ApprovalOption
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: option.label)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(selected ? .white : .white.opacity(0.72))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !option.description.isEmpty {
+                        Text(verbatim: option.description)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(selected ? 0.62 : 0.46))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Capsule()
+                    .fill(.white.opacity(selected ? 0.14 : 0.07))
+                    .overlay(
+                        Capsule()
+                            .stroke(.white.opacity(selected ? 0.20 : 0.10), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -743,15 +894,18 @@ private struct ApprovalButton: View {
     let title: String
     let shortcut: String
     let style: Style
+    var disabled = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Text(verbatim: title)
-                Text(verbatim: shortcut)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(style == .primary ? .black.opacity(0.5) : .white.opacity(0.4))
+                if !shortcut.isEmpty {
+                    Text(verbatim: shortcut)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(style == .primary ? .black.opacity(0.5) : .white.opacity(0.4))
+                }
             }
             .font(.system(size: 13, weight: .semibold))
             .frame(maxWidth: .infinity)
@@ -767,6 +921,8 @@ private struct ApprovalButton: View {
             .foregroundStyle(style == .primary ? .black : peach)
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
     }
 }
 

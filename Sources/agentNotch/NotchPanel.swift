@@ -107,8 +107,8 @@ final class NotchController {
             ui: ui,
             m: metrics,
             onOpenSettings: { [weak self] in self?.settings.show() },
-            onApprovalDecision: { [weak self] id, decision, reason in
-                self?.approvalServer.decide(id, decision: decision, reason: reason)
+            onApprovalDecision: { [weak self] id, decision, reason, answers in
+                self?.approvalServer.decide(id, decision: decision, reason: reason, answers: answers)
             },
             onSwitchClaudeAccount: { [weak self] accountID in
                 self?.switchClaudeAccount(to: accountID)
@@ -173,10 +173,11 @@ final class NotchController {
             if self.ui.collectingFeedback { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let key = event.charactersIgnoringModifiers?.lowercased()
-            if key == "a", flags.contains(.option) {
+            let isQuestionApproval = !req.questions.isEmpty
+            if !isQuestionApproval, key == "a", flags.contains(.option) {
                 self.approvalServer.decide(req.id, decision: .always); return nil
             }
-            if key == "a", flags.contains(.command) {
+            if !isQuestionApproval, key == "a", flags.contains(.command) {
                 self.approvalServer.decide(req.id, decision: .allow); return nil
             }
             if key == "n", flags.contains(.command) {

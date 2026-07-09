@@ -39,7 +39,7 @@ struct AgentNotchHook {
         }
 
         guard let reqData = try? JSONSerialization.data(withJSONObject: payload),
-              let resp = roundTrip(reqData, product: product) else {
+              let resp = roundTrip(reqData, product: product, payload: payload) else {
             failOpen(product: product)
             return
         }
@@ -79,6 +79,13 @@ struct AgentNotchHook {
     }
 
     private static func summary(_ p: [String: Any]) -> String? {
+        if toolName(p) == "AskUserQuestion",
+           let input = p["tool_input"] as? [String: Any],
+           let questions = input["questions"] as? [[String: Any]],
+           let firstQuestion = questions.first?["question"] as? String,
+           !firstQuestion.isEmpty {
+            return firstQuestion
+        }
         if let s = p["summary"] as? String { return s }
         if let cmd = p["command"] as? String { return cmd }
         if let input = p["tool_input"] as? [String: Any] {
@@ -98,7 +105,7 @@ struct AgentNotchHook {
 
     // MARK: - Socket round trip
 
-    private static func roundTrip(_ request: Data, product: String) -> Data? {
+    private static func roundTrip(_ request: Data, product: String, payload: [String: Any]) -> Data? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -136,10 +143,19 @@ struct AgentNotchHook {
         guard let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return buf }
         let decision = obj["decision"] as? String ?? "allow"
         let reason = obj["reason"] as? String
-        return formatOutput(product: product, decision: decision, reason: reason)
+        let answers = (obj["answers"] as? [String: Any])?.reduce(into: [String: String]()) { acc, pair in
+            if let value = pair.value as? String { acc[pair.key] = value }
+        }
+        return formatOutput(product: product, decision: decision, reason: reason, answers: answers, payload: payload)
     }
 
-    private static func formatOutput(product: String, decision: String, reason: String? = nil) -> Data? {
+    private static func formatOutput(
+        product: String,
+        decision: String,
+        reason: String? = nil,
+        answers: [String: String]? = nil,
+        payload: [String: Any]? = nil
+    ) -> Data? {
         let effective = decision == "always" ? "allow" : decision
         let obj: [String: Any]
         switch product {
@@ -150,6 +166,11 @@ struct AgentNotchHook {
             // accept-edits modes. A deny reason rides along best-effort (may be ignored).
             var d: [String: Any] = ["behavior": effective]
             if effective == "deny", let reason, !reason.isEmpty { d["message"] = reason }
+            if effective == "allow", let answers, !answers.isEmpty {
+                var updatedInput = payload?["tool_input"] as? [String: Any] ?? [:]
+                updatedInput["answers"] = answers
+                d["updatedInput"] = updatedInput
+            }
             obj = ["hookSpecificOutput": ["hookEventName": "PermissionRequest", "decision": d]]
         default:
             obj = ["decision": effective]

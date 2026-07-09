@@ -78,6 +78,18 @@ enum ApprovalDecision: String, Equatable, Codable {
     case allow, deny, always
 }
 
+struct ApprovalOption: Equatable {
+    let label: String
+    let description: String
+}
+
+struct ApprovalQuestion: Equatable {
+    let question: String
+    let header: String
+    let multiSelect: Bool
+    let options: [ApprovalOption]
+}
+
 struct ApprovalRequest: Equatable, Identifiable {
     let id: String
     let product: Product
@@ -87,6 +99,29 @@ struct ApprovalRequest: Equatable, Identifiable {
     let cwd: String?
     let receivedAt: Date
     let alwaysKey: String
+    let questions: [ApprovalQuestion]
+
+    init(
+        id: String,
+        product: Product,
+        sessionTitle: String,
+        toolName: String,
+        summary: String,
+        cwd: String?,
+        receivedAt: Date,
+        alwaysKey: String,
+        questions: [ApprovalQuestion] = []
+    ) {
+        self.id = id
+        self.product = product
+        self.sessionTitle = sessionTitle
+        self.toolName = toolName
+        self.summary = summary
+        self.cwd = cwd
+        self.receivedAt = receivedAt
+        self.alwaysKey = alwaysKey
+        self.questions = questions
+    }
 }
 
 // One observable holder shared by the SwiftUI hierarchies. Unchanged subtrees don't re-render.
