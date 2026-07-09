@@ -63,7 +63,8 @@ final class CursorPermissionsTests: XCTestCase {
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
         let permsPath = "/tmp/an-perms-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath) }
+        let cliConfigPath = "/tmp/an-cli-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath); unlink(cliConfigPath) }
 
         let seed: [String: Any] = ["terminalAllowlist": ["git"]]
         try JSONSerialization.data(withJSONObject: seed).write(to: URL(fileURLWithPath: permsPath))
@@ -73,7 +74,8 @@ final class CursorPermissionsTests: XCTestCase {
             store: store,
             socketPath: socketPath,
             alwaysAllowPath: allowPath,
-            cursorPermissionsPath: permsPath)
+            cursorPermissionsPath: permsPath,
+            cursorCLIConfigPath: cliConfigPath)
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 
@@ -90,6 +92,50 @@ final class CursorPermissionsTests: XCTestCase {
         XCTAssertTrue(store.pendingApprovals.isEmpty, "notch must never have been prompted")
     }
 
+    // Cursor's beforeShellExecution hook fires for every shell command. Its native
+    // Shell(...) allow rules must skip the notch just like terminalAllowlist entries.
+    func testCursorCLIAllowedCommandSkipsNotchPrompt() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        let permsPath = "/tmp/an-perms-\(short).json"
+        let cliConfigPath = "/tmp/an-cursor-cli-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath); unlink(cliConfigPath) }
+
+        let config: [String: Any] = ["permissions": ["allow": ["Shell(git)"]]]
+        try JSONSerialization.data(withJSONObject: config).write(to: URL(fileURLWithPath: cliConfigPath))
+
+        let store = UsageStore()
+        let server = ApprovalServer(
+            store: store,
+            socketPath: socketPath,
+            alwaysAllowPath: allowPath,
+            cursorPermissionsPath: permsPath,
+            cursorCLIConfigPath: cliConfigPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        var responseText = ""
+        let responseReceived = expectation(description: "auto allow without UI")
+        DispatchQueue.global().async {
+            responseText = ApprovalServerTests.roundTrip(socketPath: socketPath, request:
+                #"{"id":"cli-\#(short)","product":"cursor","toolName":"Shell","command":"git status"}"#) ?? ""
+            responseReceived.fulfill()
+        }
+
+        // Give the server a chance to enqueue a prompt. If it does, release the client
+        // so this failing regression test cannot leave a socket handler blocked.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        let prompted = !store.pendingApprovals.isEmpty
+        if let pending = store.pendingApprovals.first {
+            server.decide(pending.id, decision: .allow)
+        }
+        wait(for: [responseReceived], timeout: 3)
+
+        XCTAssertFalse(prompted, "Cursor's native Shell(git) allow rule should bypass the notch")
+        XCTAssertTrue(responseText.contains("allow"), "expected auto-allow, got: \(responseText)")
+    }
+
     func testSyncAllowIsIdempotent() throws {
         let path = "/tmp/an-perms-\(UUID().uuidString.prefix(8)).json"
         defer { unlink(path) }
@@ -102,19 +148,60 @@ final class CursorPermissionsTests: XCTestCase {
         XCTAssertEqual(terminal.filter { $0 == "npm" }.count, 1)
     }
 
+    func testCursorCLIRulesHonorAllowAndDenyPrecedence() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let permsPath = "/tmp/an-perms-\(short).json"
+        let cliConfigPath = "/tmp/an-cursor-cli-\(short).json"
+        let projectDir = URL(fileURLWithPath: "/tmp/an-cursor-project-\(short)")
+        defer {
+            unlink(permsPath)
+            unlink(cliConfigPath)
+            try? FileManager.default.removeItem(at: projectDir)
+        }
+
+        let terminal: [String: Any] = ["terminalAllowlist": ["rm"]]
+        try JSONSerialization.data(withJSONObject: terminal).write(to: URL(fileURLWithPath: permsPath))
+        let config: [String: Any] = [
+            "permissions": [
+                "allow": ["Shell(git)"],
+                "deny": ["Shell(rm)"],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: config).write(to: URL(fileURLWithPath: cliConfigPath))
+
+        XCTAssertTrue(CursorPermissions.isAutoAllowed(
+            command: "git status", permissionsPath: permsPath, cliConfigPath: cliConfigPath))
+        XCTAssertFalse(CursorPermissions.isAutoAllowed(
+            command: "gitk", permissionsPath: permsPath, cliConfigPath: cliConfigPath))
+        XCTAssertFalse(CursorPermissions.isAutoAllowed(
+            command: "rm -rf /", permissionsPath: permsPath, cliConfigPath: cliConfigPath),
+            "Cursor's explicit CLI deny must beat a terminal allowlist entry")
+
+        let projectConfig = projectDir.appendingPathComponent(".cursor/cli.json")
+        try FileManager.default.createDirectory(
+            at: projectConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let projectRules: [String: Any] = ["permissions": ["allow": ["Shell(npm)"]]]
+        try JSONSerialization.data(withJSONObject: projectRules).write(to: projectConfig)
+        XCTAssertTrue(CursorPermissions.isAutoAllowed(
+            command: "npm test", permissionsPath: permsPath, cliConfigPath: cliConfigPath,
+            cwd: projectDir.path))
+    }
+
     func testCursorAllowDecisionWritesPermissionsBeforeHookContinues() throws {
         let short = String(UUID().uuidString.prefix(8))
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
         let permsPath = "/tmp/an-perms-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath) }
+        let cliConfigPath = "/tmp/an-cli-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath); unlink(cliConfigPath) }
 
         let store = UsageStore()
         let server = ApprovalServer(
             store: store,
             socketPath: socketPath,
             alwaysAllowPath: allowPath,
-            cursorPermissionsPath: permsPath)
+            cursorPermissionsPath: permsPath,
+            cursorCLIConfigPath: cliConfigPath)
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 

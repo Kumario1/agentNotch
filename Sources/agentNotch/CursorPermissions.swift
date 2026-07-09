@@ -6,6 +6,7 @@ import Foundation
 // what makes notch "Allow" actually run the command instead of leaving Cursor waiting.
 enum CursorPermissions {
     static let defaultPath = NSString(string: "~/.cursor/permissions.json").expandingTildeInPath
+    static let defaultCLIConfigPath = NSString(string: "~/.cursor/cli-config.json").expandingTildeInPath
 
     /// First token of a shell command, kept verbatim because Cursor matches allowlist
     /// entries as prefixes of the raw command string (`/usr/bin/git status` needs the
@@ -33,11 +34,54 @@ enum CursorPermissions {
         return entries.contains { matches(command: trimmed, entry: $0) }
     }
 
+    /// Cursor runs beforeShellExecution for every terminal command, including commands it
+    /// has already allowed through its CLI configuration. Respect those native Shell(...)
+    /// rules before asking the notch; a native deny always wins over either allowlist.
+    static func isAutoAllowed(command: String,
+                              permissionsPath: String = defaultPath,
+                              cliConfigPath: String = defaultCLIConfigPath,
+                              cwd: String? = nil) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let configPaths = cliConfigPaths(globalPath: cliConfigPath, cwd: cwd)
+        let denies = shellRules(named: "deny", in: configPaths)
+        guard !denies.contains(where: { matches(command: trimmed, entry: $0) }) else { return false }
+
+        return isAllowlisted(command: trimmed, permissionsPath: permissionsPath)
+            || shellRules(named: "allow", in: configPaths)
+                .contains(where: { matches(command: trimmed, entry: $0) })
+    }
+
     private static func matches(command: String, entry: String) -> Bool {
         guard !entry.isEmpty, command.hasPrefix(entry) else { return false }
         if command.count == entry.count { return true }
         let next = command[command.index(command.startIndex, offsetBy: entry.count)]
         return next.isWhitespace
+    }
+
+    private static func cliConfigPaths(globalPath: String, cwd: String?) -> [String] {
+        guard let cwd, !cwd.isEmpty else { return [globalPath] }
+        let projectPath = URL(fileURLWithPath: cwd, isDirectory: true)
+            .appendingPathComponent(".cursor/cli.json").path
+        return projectPath == globalPath ? [globalPath] : [globalPath, projectPath]
+    }
+
+    private static func shellRules(named name: String, in configPaths: [String]) -> [String] {
+        configPaths.flatMap { path -> [String] in
+            guard let root = loadJSON(path),
+                  let permissions = root["permissions"] as? [String: Any],
+                  let rules = permissions[name] as? [String] else { return [] }
+            return rules.compactMap(shellCommandBase)
+        }
+    }
+
+    // Cursor's Shell(...) permission syntax is explicitly keyed by command base, not a
+    // shell pattern. Ignore malformed or broader rules instead of silently widening access.
+    private static func shellCommandBase(_ rule: String) -> String? {
+        guard rule.hasPrefix("Shell("), rule.hasSuffix(")") else { return nil }
+        let base = String(rule.dropFirst("Shell(".count).dropLast())
+        guard !base.isEmpty, !base.contains(where: { $0.isWhitespace }) else { return nil }
+        return base
     }
 
     @discardableResult

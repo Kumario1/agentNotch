@@ -12,11 +12,12 @@ final class ApprovalServerTests: XCTestCase {
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
         let permsPath = "/tmp/an-perms-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath) }
+        let cliConfigPath = "/tmp/an-cli-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath); unlink(cliConfigPath) }
 
         let store = UsageStore()
         let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath,
-                                    cursorPermissionsPath: permsPath)
+                                    cursorPermissionsPath: permsPath, cursorCLIConfigPath: cliConfigPath)
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 
@@ -50,7 +51,9 @@ final class ApprovalServerTests: XCTestCase {
         let short = String(UUID().uuidString.prefix(8))
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath); unlink("/tmp/an-perms-\(short).json") }
+        let permsPath = "/tmp/an-perms-\(short).json"
+        let cliConfigPath = "/tmp/an-cli-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath); unlink(cliConfigPath) }
 
         // Seed the allowlist with the key the server derives for this request.
         let alwaysKey = "cursor:Shell:ls -la"
@@ -59,7 +62,7 @@ final class ApprovalServerTests: XCTestCase {
 
         let store = UsageStore()
         let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath,
-                                    cursorPermissionsPath: "/tmp/an-perms-\(short).json")
+                                    cursorPermissionsPath: permsPath, cursorCLIConfigPath: cliConfigPath)
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 

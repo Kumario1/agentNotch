@@ -17,6 +17,7 @@ final class ApprovalServer {
     private let socketPath: String
     private let alwaysAllowPath: String
     private let cursorPermissionsPath: String
+    private let cursorCLIConfigPath: String
     private let acceptQueue = DispatchQueue(label: "agentNotch.approvals.accept", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "agentNotch.approvals.state", qos: .userInitiated)
     private let handlerQueue = DispatchQueue(label: "agentNotch.approvals.handler",
@@ -29,11 +30,13 @@ final class ApprovalServer {
     init(store: UsageStore,
          socketPath: String = ApprovalPaths.socket,
          alwaysAllowPath: String = ApprovalPaths.alwaysAllow,
-         cursorPermissionsPath: String = CursorPermissions.defaultPath) {
+         cursorPermissionsPath: String = CursorPermissions.defaultPath,
+         cursorCLIConfigPath: String = CursorPermissions.defaultCLIConfigPath) {
         self.store = store
         self.socketPath = socketPath
         self.alwaysAllowPath = alwaysAllowPath
         self.cursorPermissionsPath = cursorPermissionsPath
+        self.cursorCLIConfigPath = cursorCLIConfigPath
         loadAlwaysAllow()
     }
 
@@ -122,10 +125,14 @@ final class ApprovalServer {
 
         let request = parseRequest(obj)
 
-        // Cursor auto-runs commands already on its terminal allowlist — it never needed
-        // our permission for those, so prompting the notch would be pure noise.
+        // beforeShellExecution fires for all Cursor shell commands. Do not duplicate
+        // Cursor's terminal or CLI Shell(...) allow rules in the notch.
         if request.product == .cursor,
-           CursorPermissions.isAllowlisted(command: request.summary, permissionsPath: cursorPermissionsPath) {
+           CursorPermissions.isAutoAllowed(
+               command: request.summary,
+               permissionsPath: cursorPermissionsPath,
+               cliConfigPath: cursorCLIConfigPath,
+               cwd: request.cwd) {
             writeDecision(clientFD, request: request, decision: .allow)
             return
         }
