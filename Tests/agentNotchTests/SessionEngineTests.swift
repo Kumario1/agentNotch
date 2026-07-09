@@ -3,6 +3,81 @@ import XCTest
 
 final class SessionEngineTests: XCTestCase {
 
+    func testGitSummaryCollectsBranchAndTrackedHeadDiff() {
+        let summary = GitRepositoryProbe.summary(for: "/tmp/project") { _, args in
+            switch args {
+            case ["rev-parse", "--show-toplevel"]:
+                return .success("/tmp/project\n")
+            case ["symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return .success("feature/session-inspector\n")
+            case ["diff", "--numstat", "HEAD"]:
+                return .success("12\t3\tSources/agentNotch/Models.swift\n4\t0\tTests/agentNotchTests/SessionEngineTests.swift\n")
+            default:
+                return .failure
+            }
+        }
+
+        XCTAssertEqual(summary, RepositorySummary(
+            root: "/tmp/project", branch: "feature/session-inspector",
+            changedFiles: 2, additions: 16, deletions: 3))
+    }
+
+    func testGitSummaryUsesCommitForDetachedHead() {
+        let summary = GitRepositoryProbe.summary(for: "/tmp/project") { _, args in
+            switch args {
+            case ["rev-parse", "--show-toplevel"]:
+                return .success("/tmp/project\n")
+            case ["symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return .failure
+            case ["rev-parse", "--short", "HEAD"]:
+                return .success("a1b2c3d\n")
+            case ["diff", "--numstat", "HEAD"]:
+                return .success("")
+            default:
+                return .failure
+            }
+        }
+
+        XCTAssertEqual(summary?.branch, "a1b2c3d")
+        XCTAssertEqual(summary?.changedFiles, 0)
+    }
+
+    func testGitSummaryReturnsNilOutsideARepository() {
+        XCTAssertNil(GitRepositoryProbe.summary(for: "/tmp/not-a-repository") { _, _ in .failure })
+    }
+
+    func testGitSummaryReturnsNilWhenHeadIsUnavailable() {
+        let summary = GitRepositoryProbe.summary(for: "/tmp/project") { _, args in
+            switch args {
+            case ["rev-parse", "--show-toplevel"]:
+                return .success("/tmp/project\n")
+            case ["symbolic-ref", "--quiet", "--short", "HEAD"], ["rev-parse", "--short", "HEAD"]:
+                return .failure
+            default:
+                return .failure
+            }
+        }
+
+        XCTAssertNil(summary)
+    }
+
+    func testGitSummaryReturnsNilWhenDiffFailsInARepository() {
+        let summary = GitRepositoryProbe.summary(for: "/tmp/project") { _, args in
+            switch args {
+            case ["rev-parse", "--show-toplevel"]:
+                return .success("/tmp/project\n")
+            case ["symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return .success("main\n")
+            case ["diff", "--numstat", "HEAD"]:
+                return .failure
+            default:
+                return .failure
+            }
+        }
+
+        XCTAssertNil(summary)
+    }
+
     func testClaudeSessionParsing() {
         var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
         SessionParsing.apply(Data("""
@@ -14,6 +89,59 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(s.detail, "Running Bash")
         XCTAssertEqual(s.inputTokens, 10)
         XCTAssertEqual(s.outputTokens, 7)
+    }
+
+    func testClaudeCapturesSessionStartReplyAndTypedActivity() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"type":"user","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"user","content":"inspect this"}}"#.utf8), product: .claude, to: &s)
+        SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I found the issue and will update the parser."}]}}"#.utf8), product: .claude, to: &s)
+        SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/proj/Models.swift"}}]}}"#.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.startedAt, parseISO8601("2026-07-07T10:00:00.000Z"))
+        XCTAssertEqual(s.latestReply, "I found the issue and will update the parser.")
+        XCTAssertEqual(s.activity.last?.kind, .read)
+        XCTAssertEqual(s.activity.last?.label, "Read")
+        XCTAssertEqual(s.activity.last?.target, "Models.swift")
+        XCTAssertEqual(s.activity.map(\.at), [
+            parseISO8601("2026-07-07T10:00:00.000Z"),
+            parseISO8601("2026-07-07T10:00:03.000Z"),
+            parseISO8601("2026-07-07T10:00:05.000Z"),
+        ])
+    }
+
+    func testClaudeTimelineRetainsRepeatedToolCalls() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/proj/Models.swift"}}]}}"#.utf8), product: .claude, to: &s)
+        SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/proj/Models.swift"}}]}}"#.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.activity.map(\.kind), [.read, .read])
+        XCTAssertEqual(s.activity.map(\.at), [
+            parseISO8601("2026-07-07T10:00:00.000Z"),
+            parseISO8601("2026-07-07T10:00:02.000Z"),
+        ])
+    }
+
+    func testClaudeCapturesAllReplyTextBlocks() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"First paragraph."},{"type":"text","text":"Second paragraph."}]}}"#.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.latestReply, "First paragraph. Second paragraph.")
+    }
+
+    func testClaudeToolResultUsesTypedTimelineEvent() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"type":"user","timestamp":"2026-07-07T10:00:00.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"command completed"}]}}"#.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.activity.last?.kind, .toolOutput)
+        XCTAssertEqual(s.activity.last?.label, "Tool output")
+    }
+
+    func testSessionStartUsesFirstTranscriptTimestamp() {
+        var s = SessionParsing.empty(path: "/tmp/proj/session.jsonl", product: .claude, modifiedAt: Date(timeIntervalSince1970: 0))
+        SessionParsing.apply(Data(#"{"type":"user","timestamp":"2026-07-07T10:00:05.000Z","message":{"role":"user","content":"first"}}"#.utf8), product: .claude, to: &s)
+        SessionParsing.apply(Data(#"{"type":"user","timestamp":"2026-07-07T10:00:01.000Z","message":{"role":"user","content":"replayed"}}"#.utf8), product: .claude, to: &s)
+
+        XCTAssertEqual(s.startedAt, parseISO8601("2026-07-07T10:00:05.000Z"))
     }
 
     func testCodexSessionParsingUsesLatestTotals() {
@@ -34,6 +162,27 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(s.inputTokens, 2_500_000)
         XCTAssertEqual(s.outputTokens, 16_000)
         XCTAssertTrue(s.isActive)
+    }
+
+    func testCodexCapturesReplyAndTypedExecActivity() {
+        var s = SessionParsing.empty(path: "/tmp/rollout.jsonl", product: .codex, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:00.000Z","payload":{"type":"turn_context","cwd":"/tmp/Playground"}}"#.utf8), product: .codex, to: &s)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:03.000Z","payload":{"type":"agent_message","message":"The tests now pass."}}"#.utf8), product: .codex, to: &s)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:05.000Z","payload":{"type":"function_call","name":"exec_command"}}"#.utf8), product: .codex, to: &s)
+
+        XCTAssertEqual(s.startedAt, parseISO8601("2026-07-07T10:00:00.000Z"))
+        XCTAssertEqual(s.latestReply, "The tests now pass.")
+        XCTAssertEqual(s.activity.last?.kind, .shell)
+        XCTAssertEqual(s.activity.last?.label, "exec_command")
+        XCTAssertEqual(s.activity.last?.at, parseISO8601("2026-07-07T10:00:05.000Z"))
+    }
+
+    func testCodexClassifiesGitCommandsFromFunctionArguments() {
+        var s = SessionParsing.empty(path: "/tmp/rollout.jsonl", product: .codex, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:00.000Z","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git diff -- Sources/agentNotch/Models.swift\"}"}}"#.utf8), product: .codex, to: &s)
+
+        XCTAssertEqual(s.activity.last?.kind, .git)
+        XCTAssertEqual(s.activity.last?.label, "git diff -- Sources/agentNotch/Models.swift")
     }
 
     func testCodexTaskCompleteMarksSessionInactive() {
@@ -92,6 +241,8 @@ final class SessionEngineTests: XCTestCase {
         SessionParsing.apply(Data(#"{"type":"assistant","timestamp":"2026-07-07T10:01:00.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#.utf8), product: .claude, to: &s)
         XCTAssertFalse(s.isActive, "end_turn ends the working state")
         XCTAssertEqual(s.detail, "Idle", "idle rows carry a clear cue while the terminal stays open")
+        XCTAssertEqual(s.activity.last?.kind, .lifecycle)
+        XCTAssertEqual(s.activity.last?.label, "Idle")
     }
 
     func testPublishableShowsOnlyLiveClaudeSessions() {
@@ -150,6 +301,25 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertTrue(s.isActive)
     }
 
+    func testCursorCapturesReplyAndTypedReadActivity() {
+        var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:00.000Z","role":"assistant","message":{"content":[{"type":"text","text":"I will inspect the model first."},{"type":"tool_use","name":"Read","input":{"path":"/tmp/foo/Models.swift"}}]}}"#.utf8), product: .cursor, to: &s)
+
+        XCTAssertEqual(s.startedAt, parseISO8601("2026-07-07T10:00:00.000Z"))
+        XCTAssertEqual(s.latestReply, "I will inspect the model first.")
+        XCTAssertEqual(s.activity.last?.kind, .read)
+        XCTAssertEqual(s.activity.last?.label, "Read")
+        XCTAssertEqual(s.activity.last?.at, parseISO8601("2026-07-07T10:00:00.000Z"))
+    }
+
+    func testCursorToolOutputUsesTypedTimelineEvent() {
+        var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
+        SessionParsing.apply(Data(#"{"timestamp":"2026-07-07T10:00:00.000Z","role":"tool","message":{"content":"done"}}"#.utf8), product: .cursor, to: &s)
+
+        XCTAssertEqual(s.activity.last?.kind, .toolOutput)
+        XCTAssertEqual(s.activity.last?.label, "Tool output")
+    }
+
     func testCursorTurnEndedMarksSessionInactive() {
         var s = SessionParsing.empty(path: "/tmp/.cursor/projects/foo/agent-transcripts/u/u.jsonl", product: .cursor, modifiedAt: .distantPast)
         SessionParsing.apply(Data(#"{"role":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#.utf8), product: .cursor, to: &s)
@@ -178,7 +348,7 @@ final class SessionEngineTests: XCTestCase {
 
         XCTAssertEqual(s.cwd, "/Users/me/Documents/sentinel-dev")
         XCTAssertEqual(s.title, "sentinel-dev")
-        XCTAssertEqual(s.detail, "Running Read")
+        XCTAssertEqual(s.detail, "Running Read · README.md")
         XCTAssertTrue(s.isActive)
     }
 

@@ -12,6 +12,7 @@ struct AgentSession: Equatable, Identifiable {
     var outputTokens = 0
     var cacheReadTokens = 0      // billed ~0.1x input
     var cacheCreationTokens = 0  // billed ~1.25x input (5-min write)
+    var startedAt: Date? = nil
     var lastActivity: Date
     var isActive = false        // mid-turn: the agent is working right now
     var isAlive = false         // the hosting terminal/CLI process is still open
@@ -19,6 +20,8 @@ struct AgentSession: Equatable, Identifiable {
     var transcriptPath: String
     var todos: [TodoItem] = []
     var activity: [ActivityEntry] = []
+    var latestReply: String? = nil
+    var repository: RepositorySummary? = nil
 }
 
 struct TodoItem: Equatable {
@@ -26,9 +29,36 @@ struct TodoItem: Equatable {
     var status: String   // lenient: "pending" / "in_progress" / "completed"
 }
 
+enum ActivityKind: Equatable {
+    case shell, git, read, search, patch, write, toolOutput, reply, lifecycle, other
+}
+
 struct ActivityEntry: Equatable {
     let at: Date
+    let kind: ActivityKind
+    let label: String
+    let target: String?
     let text: String
+
+    init(at: Date, kind: ActivityKind, label: String, target: String? = nil, text: String? = nil) {
+        self.at = at
+        self.kind = kind
+        self.label = label
+        self.target = target
+        self.text = text ?? (target.map { "\(label) · \($0)" } ?? label)
+    }
+
+    init(at: Date, text: String) {
+        self.init(at: at, kind: .other, label: text, text: text)
+    }
+}
+
+struct RepositorySummary: Equatable {
+    let root: String
+    let branch: String
+    let changedFiles: Int
+    let additions: Int
+    let deletions: Int
 }
 
 extension AgentSession {

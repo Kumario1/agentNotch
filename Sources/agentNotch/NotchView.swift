@@ -831,10 +831,12 @@ private struct SessionControl: View {
     let session: AgentSession
     let close: () -> Void
     @State private var confirmingStop = false
+    @State private var planExpanded = false
+    @State private var timelineExpanded = true
+    @State private var copiedReply = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            // Back to the list.
+        VStack(alignment: .leading, spacing: 12) {
             Button(action: close) {
                 HStack(spacing: 3) {
                     Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
@@ -844,65 +846,24 @@ private struct SessionControl: View {
             }
             .buttonStyle(.plain)
 
-            // Hero: tile · title / project · live status.
-            HStack(spacing: 13) {
-                productTile(session.product, size: 44)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(verbatim: session.title)
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        if let model = shortModel(session.model) {
-                            Text(verbatim: model)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(peach)
-                                .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(Capsule().fill(peach.opacity(0.16)))
-                        }
-                    }
-                    if let cwd = session.cwd {
-                        Text(verbatim: prettyPath(cwd))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.42))
-                            .lineLimit(1).truncationMode(.head)
-                    }
-                }
-                Spacer(minLength: 8)
-                StatusBadge(active: session.isActive)
-            }
-
-            // What it's doing right now.
-            Text(verbatim: session.detail)
-                .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                .foregroundStyle(peach)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 11).fill(.black.opacity(0.28)))
-
-            // Stat tiles.
-            HStack(spacing: 8) {
-                StatTile(label: "IN", value: compactCount(session.inputTokens))
-                StatTile(label: "OUT", value: compactCount(session.outputTokens))
-                if let cost = estimatedCost(session) {
-                    StatTile(label: "COST", value: cost)
-                }
-                TimelineView(.periodic(from: .now, by: 15)) { _ in
-                    StatTile(label: "AGE", value: shortAge(session.lastActivity))
-                }
-            }
-
-            // Tasks + activity — fills the extra height the notch gains on open.
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 12) {
+                    SessionInspectorHeader(session: session)
+                    if let reply = session.latestReply {
+                        LastReplySection(reply: reply, copied: copiedReply) {
+                            copyToPasteboard(reply)
+                            copiedReply = true
+                        }
+                    }
                     if !session.todos.isEmpty {
-                        sectionLabel("TASKS")
-                        TodoList(todos: session.todos)
+                        InspectorDisclosure(title: "PLAN", isExpanded: $planExpanded) {
+                            TodoList(todos: session.todos)
+                        }
                     }
                     if !session.activity.isEmpty {
-                        sectionLabel("ACTIVITY")
-                        ActivityFeed(activity: session.activity)
+                        InspectorDisclosure(title: "TIMELINE", isExpanded: $timelineExpanded) {
+                            ActivityFeed(activity: session.activity, startedAt: session.startedAt ?? session.lastActivity)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -939,7 +900,147 @@ private struct SessionControl: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.white.opacity(0.06))
         )
-        .onChange(of: session.id) { _, _ in confirmingStop = false }
+        .onChange(of: session.id) { _, _ in
+            confirmingStop = false
+            planExpanded = false
+            timelineExpanded = true
+            copiedReply = false
+        }
+        .onChange(of: session.latestReply) { _, _ in copiedReply = false }
+    }
+}
+
+private struct SessionInspectorHeader: View {
+    let session: AgentSession
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            productTile(session.product, size: 34)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text(verbatim: session.title)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text("·")
+                        .foregroundStyle(.white.opacity(0.35))
+                    Text(verbatim: session.detail)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(peach)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                if let cwd = session.cwd {
+                    Text(verbatim: prettyPath(cwd))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 11) {
+                        if let model = shortModel(session.model) {
+                            InspectorMetric(icon: "cpu", value: model)
+                        }
+                        if let repository = session.repository {
+                            InspectorMetric(icon: "arrow.triangle.branch", value: repository.branch)
+                        }
+                        if session.inputTokens + session.outputTokens > 0 {
+                            InspectorMetric(icon: "arrow.up", value: compactCount(session.inputTokens))
+                            InspectorMetric(icon: "arrow.down", value: compactCount(session.outputTokens))
+                        }
+                        if let cost = estimatedCost(session) {
+                            InspectorMetric(icon: "dollarsign.circle", value: cost)
+                        }
+                        if let repository = session.repository {
+                            InspectorMetric(icon: "doc.on.doc", value: "\(repository.changedFiles)")
+                            InspectorMetric(icon: "plus", value: "\(repository.additions)", tint: .green)
+                            InspectorMetric(icon: "minus", value: "\(repository.deletions)", tint: dangerRed)
+                        }
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                TimelineView(.periodic(from: .now, by: 15)) { _ in
+                    Text(verbatim: sessionElapsed(session.startedAt ?? session.lastActivity))
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                StatusBadge(active: session.isActive)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.black.opacity(0.2)))
+    }
+}
+
+private struct InspectorMetric: View {
+    let icon: String
+    let value: String
+    var tint: Color = .white.opacity(0.52)
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(tint)
+            Text(verbatim: value)
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.72))
+        }
+    }
+}
+
+private struct LastReplySection: View {
+    let reply: String
+    let copied: Bool
+    let copy: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                sectionLabel("LAST REPLY")
+                Spacer()
+                Button(action: copy) {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(copied ? peach : .white.opacity(0.55))
+                }
+                .buttonStyle(.plain)
+            }
+            Text(verbatim: reply)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.22)))
+        }
+    }
+}
+
+private struct InspectorDisclosure<Content: View>: View {
+    let title: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Button { withAnimation(.smooth(duration: 0.18)) { isExpanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    sectionLabel(title)
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white.opacity(0.5))
+
+            if isExpanded { content() }
+        }
     }
 }
 
@@ -965,25 +1066,6 @@ private struct StatusBadge: View {
     }
 }
 
-private struct StatTile: View {
-    let label: String
-    let value: String
-    var body: some View {
-        VStack(spacing: 3) {
-            Text(verbatim: value)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            Text(verbatim: label)
-                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
-    }
-}
-
 private func sectionLabel(_ t: String) -> some View {
     Text(verbatim: t)
         .font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.5)
@@ -993,6 +1075,24 @@ private func sectionLabel(_ t: String) -> some View {
 private func prettyPath(_ p: String) -> String {
     let home = NSHomeDirectory()
     return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
+}
+
+private func copyToPasteboard(_ text: String) {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+}
+
+private func elapsedSince(_ date: Date, from start: Date) -> String {
+    let seconds = max(0, Int(date.timeIntervalSince(start)))
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 { return "\(seconds / 60)m" }
+    if seconds < 86_400 { return "\(seconds / 3600)h" }
+    return "\(seconds / 86_400)d"
+}
+
+private func sessionElapsed(_ startedAt: Date) -> String {
+    elapsedSince(Date(), from: startedAt)
 }
 
 // Live checklist — appears only when the session has TodoWrite data (tasks enabled).
@@ -1027,29 +1127,73 @@ private struct TodoList: View {
     }
 }
 
-// Recent tool-call / activity timeline (newest first) — the "watch it work" feed.
+// Recent tool-call / activity timeline (oldest first) — the "watch it work" feed.
 private struct ActivityFeed: View {
     let activity: [ActivityEntry]
+    let startedAt: Date
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(activity.suffix(16).reversed().enumerated()), id: \.offset) { _, entry in
+        let entries = Array(activity.suffix(16).enumerated()).sorted {
+            $0.element.at == $1.element.at ? $0.offset < $1.offset : $0.element.at < $1.element.at
+        }
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(entries, id: \.offset) { _, entry in
                 HStack(spacing: 8) {
-                    Text(verbatim: shortAge(entry.at))
+                    Image(systemName: activityIcon(entry.kind))
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(activityColor(entry.kind))
+                        .frame(width: 14)
+                    Text(verbatim: entry.label)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
+                    if let target = entry.target {
+                        Text("·")
+                            .foregroundStyle(.white.opacity(0.3))
+                        Text(verbatim: target)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.56))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                    Text(verbatim: elapsedSince(entry.at, from: startedAt))
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.35))
-                        .frame(width: 30, alignment: .leading)
-                    Text(verbatim: entry.text)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
+                        .frame(width: 36, alignment: .trailing)
                 }
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.22)))
+    }
+}
+
+private func activityIcon(_ kind: ActivityKind) -> String {
+    switch kind {
+    case .shell: return "terminal"
+    case .git: return "arrow.triangle.branch"
+    case .read: return "doc.text"
+    case .search: return "magnifyingglass"
+    case .patch: return "checkmark"
+    case .write: return "square.and.pencil"
+    case .toolOutput: return "arrow.down.doc"
+    case .reply: return "text.bubble"
+    case .lifecycle: return "circle.dashed"
+    case .other: return "circle"
+    }
+}
+
+private func activityColor(_ kind: ActivityKind) -> Color {
+    switch kind {
+    case .git: return peach
+    case .read: return Color(red: 0.47, green: 0.75, blue: 1.0)
+    case .search: return Color(red: 0.43, green: 0.90, blue: 0.76)
+    case .patch, .write: return Color(red: 0.48, green: 0.85, blue: 0.61)
+    case .shell, .toolOutput: return Color(red: 0.77, green: 0.57, blue: 1.0)
+    case .reply: return peach
+    case .lifecycle, .other: return .white.opacity(0.42)
     }
 }
 

@@ -18,7 +18,9 @@ enum SessionParsing {
         let payload = obj["payload"] as? [String: Any]
         let message = obj["message"] as? [String: Any]
 
-        if let ts = (obj["timestamp"] as? String).flatMap(parseISO8601) {
+        let timestamp = (obj["timestamp"] as? String).flatMap(parseISO8601)
+        if let ts = timestamp {
+            if s.startedAt == nil { s.startedAt = ts }
             s.lastActivity = max(s.lastActivity, ts)
         }
         if let cwd = obj["cwd"] as? String ?? payload?["cwd"] as? String, !cwd.isEmpty {
@@ -30,6 +32,7 @@ enum SessionParsing {
         }
 
         let before = s.detail
+        let timelineDetail = activityDetail(obj, payload: payload, message: message, product: product)
         switch product {
         case .claude:
             applyClaude(obj, message: message, to: &s)
@@ -38,7 +41,11 @@ enum SessionParsing {
         case .cursor:
             applyCursor(obj, message: message, to: &s)
         }
-        if s.detail != before { appendActivity(&s, s.detail) }
+        if let timelineDetail {
+            appendActivity(&s, timelineDetail, at: timestamp ?? s.lastActivity)
+        } else if s.detail != before {
+            appendActivity(&s, s.detail, at: timestamp ?? s.lastActivity)
+        }
     }
 
     private static func applyClaude(_ obj: [String: Any], message: [String: Any]?, to s: inout AgentSession) {
@@ -80,11 +87,13 @@ enum SessionParsing {
         let role = message["role"] as? String ?? type
         if role == "assistant" {
             s.isActive = true
+            let reply = text(message["content"])
+            if let reply { s.latestReply = reply }
             if let tool = toolName(message["content"]) {
                 let input = firstToolInput(message["content"])
                 s.detail = toolDetail(tool, input)
                 if tool == "TodoWrite", let t = parseTodos(input) { s.todos = t }
-            } else if text(message["content"]) != nil {
+            } else if reply != nil {
                 s.detail = "Replying"
             }
             if message["stop_reason"] as? String == "end_turn" {
@@ -108,12 +117,16 @@ enum SessionParsing {
         switch type {
         case "function_call", "custom_tool_call":
             s.isActive = true
-            s.detail = "Running \((payload["name"] as? String) ?? "tool")"
+            let name = (payload["name"] as? String) ?? "tool"
+            s.detail = toolDetail(name, toolInput(payload["arguments"] ?? payload["input"] ?? payload["args"]))
         case "function_call_output", "custom_tool_call_output":
             s.isActive = true
             s.detail = "Reading output"
         case "agent_message":
             s.isActive = true
+            if let reply = clean(payload["message"] as? String) ?? text(payload["content"]) {
+                s.latestReply = reply
+            }
             s.detail = "Replying"
         case "reasoning":
             s.isActive = true
@@ -161,9 +174,11 @@ enum SessionParsing {
 
         if role == "assistant" {
             s.isActive = true
+            let reply = text(message?["content"])
+            if let reply { s.latestReply = reply }
             if let tool = toolName(message?["content"]) {
-                s.detail = "Running \(tool)"
-            } else if let t = text(message?["content"]) {
+                s.detail = toolDetail(tool, firstToolInput(message?["content"]))
+            } else if let t = reply {
                 s.detail = String(t.prefix(80))
             } else {
                 s.detail = "Replying"
@@ -263,6 +278,21 @@ enum SessionParsing {
         return nil
     }
 
+    private static func hasToolResult(_ content: Any?) -> Bool {
+        guard let parts = content as? [[String: Any]] else { return false }
+        return parts.contains {
+            let type = $0["type"] as? String
+            return type == "tool_result" || type == "tool_output"
+        }
+    }
+
+    private static func toolInput(_ value: Any?) -> [String: Any]? {
+        if let object = value as? [String: Any] { return object }
+        guard let json = value as? String,
+              let data = json.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
     private static func toolName(_ content: Any?) -> String? {
         guard let parts = content as? [[String: Any]] else { return nil }
         for p in parts {
@@ -283,7 +313,7 @@ enum SessionParsing {
 
     private static func toolTarget(_ input: [String: Any]?) -> String? {
         guard let input else { return nil }
-        if let cmd = clean(input["command"] as? String) { return snippet(cmd) }
+        if let cmd = clean(input["command"] as? String) ?? clean(input["cmd"] as? String) { return snippet(cmd) }
         for k in ["file_path", "path", "notebook_path", "filePath"] {
             if let p = input[k] as? String, !p.isEmpty { return URL(fileURLWithPath: p).lastPathComponent }
         }
@@ -307,19 +337,87 @@ enum SessionParsing {
     }
 
     // Ring buffer of activity transitions — feeds the detail-card timeline.
-    private static func appendActivity(_ s: inout AgentSession, _ text: String) {
-        guard !text.isEmpty, text != s.activity.last?.text else { return }
-        s.activity.append(ActivityEntry(at: s.lastActivity, text: text))
+    private static func appendActivity(_ s: inout AgentSession, _ text: String, at: Date) {
+        guard !text.isEmpty else { return }
+        let entry = activityDescriptor(for: text)
+        s.activity.append(ActivityEntry(at: at, kind: entry.kind, label: entry.label,
+                                        target: entry.target, text: text))
         if s.activity.count > 24 { s.activity.removeFirst() }
+    }
+
+    private static func activityDescriptor(for text: String) -> (kind: ActivityKind, label: String, target: String?) {
+        if text == "Replying" { return (.reply, "Reply", nil) }
+        if text == "Reading output" || text == "Tool output" { return (.toolOutput, "Tool output", nil) }
+        if text == "Applying patch" { return (.patch, "Apply patch", nil) }
+        guard text.hasPrefix("Running ") else { return (.lifecycle, text, nil) }
+
+        let body = String(text.dropFirst("Running ".count))
+        let pieces = body.components(separatedBy: " · ")
+        let tool = pieces[0]
+        let target = pieces.count > 1 ? pieces.dropFirst().joined(separator: " · ") : nil
+        let lowerTool = tool.lowercased()
+        let lowerTarget = target?.lowercased() ?? ""
+
+        if lowerTarget.hasPrefix("git ") || lowerTool == "git" { return (.git, target ?? tool, nil) }
+        if lowerTool.contains("patch") { return (.patch, tool, target) }
+        if ["read", "view", "cat"].contains(lowerTool) { return (.read, tool, target) }
+        if ["grep", "search", "find", "glob"].contains(lowerTool) { return (.search, tool, target) }
+        if ["write", "edit", "todowrite"].contains(lowerTool) { return (.write, tool, target) }
+        if lowerTool.contains("exec") || ["bash", "shell", "terminal", "command"].contains(lowerTool) {
+            return (.shell, tool, target)
+        }
+        return (.other, tool, target)
+    }
+
+    private static func activityDetail(
+        _ obj: [String: Any], payload: [String: Any]?, message: [String: Any]?, product: Product
+    ) -> String? {
+        switch product {
+        case .claude:
+            let content = message?["content"]
+            let role = message?["role"] as? String ?? obj["type"] as? String
+            if role == "user", hasToolResult(content) { return "Tool output" }
+            guard obj["type"] as? String == "assistant" else { return nil }
+            if message?["stop_reason"] as? String == "end_turn" { return "Idle" }
+            if let tool = toolName(content) {
+                return toolDetail(tool, firstToolInput(content))
+            }
+            return text(content).map { _ in "Replying" }
+
+        case .codex:
+            guard let payload, let type = payload["type"] as? String else { return nil }
+            switch type {
+            case "function_call", "custom_tool_call":
+                let name = (payload["name"] as? String) ?? "tool"
+                return toolDetail(name, toolInput(payload["arguments"] ?? payload["input"] ?? payload["args"]))
+            case "function_call_output", "custom_tool_call_output": return "Reading output"
+            case "agent_message": return "Replying"
+            case "patch_apply_end": return "Applying patch"
+            case "task_started": return "Working"
+            case "task_complete": return "Done"
+            case "turn_aborted": return "Stopped"
+            case "reasoning": return "Thinking"
+            default: return nil
+            }
+
+        case .cursor:
+            if obj["type"] as? String == "turn_ended" { return "Done" }
+            let role = obj["role"] as? String ?? message?["role"] as? String
+            if role == "tool" { return "Tool output" }
+            guard role == "assistant" else { return nil }
+            let content = message?["content"]
+            if let tool = toolName(content) {
+                return toolDetail(tool, firstToolInput(content))
+            }
+            return text(content).map { _ in "Replying" }
+        }
     }
 
     private static func text(_ content: Any?) -> String? {
         if let s = clean(content as? String) { return s }
         guard let parts = content as? [[String: Any]] else { return nil }
-        for p in parts {
-            if let s = clean(p["text"] as? String ?? p["content"] as? String) { return s }
-        }
-        return nil
+        let textParts = parts.compactMap { clean($0["text"] as? String ?? $0["content"] as? String) }
+        return clean(textParts.joined(separator: " "))
     }
 
     private static func clean(_ s: String?) -> String? {
@@ -344,6 +442,11 @@ enum SessionParsing {
 }
 
 final class SessionEngine {
+    private struct CachedGitSummary {
+        let fetchedAt: Date
+        let summary: RepositorySummary?
+    }
+
     private let config: AppConfig
     private let store: UsageStore
     private let queue = DispatchQueue(label: "agentNotch.sessions", qos: .utility)
@@ -351,6 +454,7 @@ final class SessionEngine {
     private var offsets: [String: UInt64] = [:]
     private var partials: [String: Data] = [:]
     private var sessions: [String: AgentSession] = [:]
+    private var gitCache: [String: CachedGitSummary] = [:]
     private var pinnedSnapshot: Set<String> = []   // pins mirrored here so scan (utility queue) reads them race-free
 
     init(config: AppConfig, store: UsageStore) {
@@ -437,6 +541,8 @@ final class SessionEngine {
             }
         }
 
+        refreshRepositorySummaries(now: Date())
+
         let sorted = SessionEngine.publishable(sessions.values, pinned: pinnedSnapshot)
         DispatchQueue.main.async { [store] in
             if store.sessions != sorted { store.sessions = sorted }
@@ -456,6 +562,31 @@ final class SessionEngine {
                 if lhs.isActive != rhs.isActive { return lhs.isActive } // then working
                 return lhs.lastActivity > rhs.lastActivity             // then newest
             }
+    }
+
+    // Git work runs only on the engine's utility queue. Cache by cwd so sessions in
+    // one project share a probe and never cause work during SwiftUI rendering.
+    private func refreshRepositorySummaries(now: Date) {
+        let workingDirectories = Set(sessions.values.compactMap(\.cwd))
+        var summaries: [String: CachedGitSummary] = [:]
+
+        for cwd in workingDirectories {
+            let cached: CachedGitSummary
+            if let existing = gitCache[cwd], now.timeIntervalSince(existing.fetchedAt) < 10 {
+                cached = existing
+            } else {
+                cached = CachedGitSummary(fetchedAt: now, summary: GitRepositoryProbe.summary(for: cwd))
+                gitCache[cwd] = cached
+            }
+            summaries[cwd] = cached
+        }
+        gitCache = gitCache.filter { workingDirectories.contains($0.key) }
+
+        for path in Array(sessions.keys) {
+            guard var session = sessions[path] else { continue }
+            session.repository = session.cwd.flatMap { summaries[$0]?.summary }
+            sessions[path] = session
+        }
     }
 
     private func isCurrent(_ url: URL, cutoff: Date) -> Bool {

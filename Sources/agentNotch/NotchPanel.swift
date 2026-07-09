@@ -212,7 +212,7 @@ final class NotchController {
         let hasApproval = !store.pendingApprovals.isEmpty
         let expanded = CGSize(width: max(540, collapsed.width + 140), height: hasApproval ? 440 : 380)
         // Opening one session grows the notch taller to show its full detail.
-        let expandedDetail = CGSize(width: expanded.width, height: 680)
+        let expandedDetail = CGSize(width: expanded.width, height: 720)
         metrics = NotchMetrics(notchWidth: notch.width, collapsed: collapsed,
                                expanded: expanded, expandedDetail: expandedDetail)
         // The window hosts the tallest state; shorter states pin to the top edge.
