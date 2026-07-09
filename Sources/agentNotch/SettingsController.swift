@@ -121,8 +121,10 @@ struct SettingsView: View {
                 Text(claudeHookInstalled ? "Hook installed" : "Hook not installed")
                     .font(.caption)
                     .foregroundStyle(claudeHookInstalled ? .green : .secondary)
-                Toggle("Cursor (best-effort; deny reliable)", isOn: $config.approvalsEnabledCursor)
-                Text(cursorHookInstalled ? "Hook installed" : "Hook not installed")
+                Toggle("Cursor (Allow presses Run in Cursor)", isOn: $config.approvalsEnabledCursor)
+                Text(cursorHookInstalled
+                     ? "Hook installed — Allow syncs the command to ~/.cursor/permissions.json and presses Cursor's Run button (needs Accessibility permission)"
+                     : "Hook not installed")
                     .font(.caption)
                     .foregroundStyle(cursorHookInstalled ? .green : .secondary)
             }

@@ -16,6 +16,7 @@ final class ApprovalServer {
     private let store: UsageStore
     private let socketPath: String
     private let alwaysAllowPath: String
+    private let cursorPermissionsPath: String
     private let acceptQueue = DispatchQueue(label: "agentNotch.approvals.accept", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "agentNotch.approvals.state", qos: .userInitiated)
     private let handlerQueue = DispatchQueue(label: "agentNotch.approvals.handler",
@@ -27,10 +28,12 @@ final class ApprovalServer {
 
     init(store: UsageStore,
          socketPath: String = ApprovalPaths.socket,
-         alwaysAllowPath: String = ApprovalPaths.alwaysAllow) {
+         alwaysAllowPath: String = ApprovalPaths.alwaysAllow,
+         cursorPermissionsPath: String = CursorPermissions.defaultPath) {
         self.store = store
         self.socketPath = socketPath
         self.alwaysAllowPath = alwaysAllowPath
+        self.cursorPermissionsPath = cursorPermissionsPath
         loadAlwaysAllow()
     }
 
@@ -40,9 +43,16 @@ final class ApprovalServer {
 
     // Called on the main thread from the notch UI (button / key monitor).
     func decide(_ id: String, decision: ApprovalDecision, reason: String? = nil) {
-        let alwaysKey = decision == .always
-            ? store.pendingApprovals.first(where: { $0.id == id })?.alwaysKey
-            : nil
+        let pending = store.pendingApprovals.first(where: { $0.id == id })
+        let alwaysKey = decision == .always ? pending?.alwaysKey : nil
+        // Cursor ignores hook `permission: allow` unless the command is already on its
+        // terminal allowlist. Sync for future runs, and press the Run button on the card
+        // Cursor is about to show (or already shows) so the pending command actually runs.
+        if decision == .allow || decision == .always,
+           let pending, pending.product == .cursor {
+            CursorPermissions.syncAllow(command: pending.summary, permissionsPath: cursorPermissionsPath)
+            CursorRunClicker.clickPendingRun()
+        }
         store.pendingApprovals.removeAll { $0.id == id }
 
         stateQueue.async { [weak self] in
@@ -111,13 +121,32 @@ final class ApprovalServer {
               let obj = try? JSONSerialization.jsonObject(with: buf) as? [String: Any] else { return }
 
         let request = parseRequest(obj)
+
+        // Cursor auto-runs commands already on its terminal allowlist — it never needed
+        // our permission for those, so prompting the notch would be pure noise.
+        if request.product == .cursor,
+           CursorPermissions.isAllowlisted(command: request.summary, permissionsPath: cursorPermissionsPath) {
+            writeDecision(clientFD, request: request, decision: .allow)
+            return
+        }
+
         let autoAllow = stateQueue.sync { alwaysAllow.contains(request.alwaysKey) }
         if autoAllow {
+            if request.product == .cursor {
+                CursorPermissions.syncAllow(command: request.summary, permissionsPath: cursorPermissionsPath)
+                CursorRunClicker.clickPendingRun()
+            }
             writeDecision(clientFD, request: request, decision: .allow)
             return
         }
 
         let (decision, reason) = blockForDecision(request)
+        // The allow path just synced the command into ~/.cursor/permissions.json (in
+        // decide()). Cursor re-reads that file on change, but asynchronously — give the
+        // watcher a beat so the pending command auto-runs instead of re-prompting in Cursor.
+        if request.product == .cursor, decision == .allow {
+            Thread.sleep(forTimeInterval: 0.4)
+        }
         writeDecision(clientFD, request: request, decision: decision, reason: reason)
     }
 

@@ -141,6 +141,8 @@ Open the gear in the expanded notch:
 
 When hooks are enabled, pending tool approvals bounce the notch. Use **Allow**, **Always Allow**, or **Deny** (⌘A / ⌥A / ⌘N while the panel is key).
 
+For Cursor, **Allow** / **Always Allow** also adds the command’s first token to `~/.cursor/permissions.json`. Cursor’s Auto-review often ignores hook `allow` unless the command is already on that allowlist — without the sync, the notch can approve while Cursor still shows Skip / Always Run / Run.
+
 ---
 
 ## Develop

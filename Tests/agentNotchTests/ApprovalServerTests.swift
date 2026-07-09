@@ -11,10 +11,12 @@ final class ApprovalServerTests: XCTestCase {
         let short = String(UUID().uuidString.prefix(8))
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath) }
+        let permsPath = "/tmp/an-perms-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath); unlink(permsPath) }
 
         let store = UsageStore()
-        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath,
+                                    cursorPermissionsPath: permsPath)
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 
@@ -48,7 +50,7 @@ final class ApprovalServerTests: XCTestCase {
         let short = String(UUID().uuidString.prefix(8))
         let socketPath = "/tmp/an-\(short).sock"
         let allowPath = "/tmp/an-\(short).json"
-        defer { unlink(socketPath); unlink(allowPath) }
+        defer { unlink(socketPath); unlink(allowPath); unlink("/tmp/an-perms-\(short).json") }
 
         // Seed the allowlist with the key the server derives for this request.
         let alwaysKey = "cursor:Shell:ls -la"
@@ -56,7 +58,8 @@ final class ApprovalServerTests: XCTestCase {
         try seed.write(to: URL(fileURLWithPath: allowPath))
 
         let store = UsageStore()
-        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath,
+                                    cursorPermissionsPath: "/tmp/an-perms-\(short).json")
         server.start()
         XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
 
