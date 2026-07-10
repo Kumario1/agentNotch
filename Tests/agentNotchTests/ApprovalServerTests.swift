@@ -110,7 +110,126 @@ final class ApprovalServerTests: XCTestCase {
         XCTAssertTrue(responseText.contains("too destructive"), "reason must ride back to the hook, got: \(responseText)")
     }
 
+    func testAskUserQuestionParsesQuestionsAndReturnsAnswers() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath) }
+
+        let store = UsageStore()
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        let reqID = "req-\(short)"
+        var responseText = ""
+        let responseReceived = expectation(description: "hook receives question answers")
+        DispatchQueue.global().async {
+            responseText = Self.roundTrip(socketPath: socketPath, request:
+                #"{"id":"\#(reqID)","product":"claude","toolName":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick one?","header":"Choice","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}}"#) ?? ""
+            responseReceived.fulfill()
+        }
+
+        let pending = try XCTUnwrap(waitForPending(store: store, timeout: 3))
+        XCTAssertEqual(pending.questions, [
+            ApprovalQuestion(
+                question: "Pick one?",
+                header: "Choice",
+                multiSelect: false,
+                options: [
+                    ApprovalOption(label: "A", description: "first"),
+                    ApprovalOption(label: "B", description: "second"),
+                ])
+        ])
+
+        server.decide(reqID, decision: .allow, answers: ["Pick one?": "B"])
+        wait(for: [responseReceived], timeout: 5)
+
+        let data = try XCTUnwrap(responseText.data(using: .utf8))
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["decision"] as? String, "allow")
+        XCTAssertEqual((obj["answers"] as? [String: Any])?["Pick one?"] as? String, "B")
+    }
+
+    func testAskUserQuestionIgnoresAlwaysAllowEntry() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath) }
+
+        let alwaysKey = "claude:AskUserQuestion:AskUserQuestion"
+        let seed = try JSONSerialization.data(withJSONObject: [alwaysKey])
+        try seed.write(to: URL(fileURLWithPath: allowPath))
+
+        let store = UsageStore()
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        let reqID = "req-\(short)"
+        var responseText = ""
+        let responseReceived = expectation(description: "hook receives question decision")
+        DispatchQueue.global().async {
+            responseText = Self.roundTrip(socketPath: socketPath, request:
+                #"{"id":"\#(reqID)","product":"claude","toolName":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick one?","options":[{"label":"A"},{"label":"B"}]}]}}"#) ?? ""
+            responseReceived.fulfill()
+        }
+
+        let pending = try XCTUnwrap(waitForPending(store: store, timeout: 1),
+                                   "question prompts must still reach the UI even when their always-allow key is present")
+        XCTAssertEqual(pending.id, reqID)
+        server.decide(reqID, decision: .allow, answers: ["Pick one?": "A"])
+
+        wait(for: [responseReceived], timeout: 5)
+        XCTAssertTrue(responseText.contains("\"answers\""), "expected selected answer, got: \(responseText)")
+    }
+
     // MARK: - Helpers
+
+    // Regression (issue #3): answering the prompt in the terminal kills the hook process.
+    // The socket EOF must dismiss the stale notch card instead of asking forever.
+    func testHookDisconnectDismissesPendingApproval() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath) }
+
+        let store = UsageStore()
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        // Connect like the hook, send the request, but never read a response.
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        socketPath.withCString { cstr in
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                let dst = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
+                strncpy(dst, cstr, 104)
+            }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, len) }
+        }
+        XCTAssertEqual(connected, 0)
+        var out = Data(#"{"id":"gone-\#(short)","product":"claude","toolName":"Bash","summary":"ls"}"#.utf8)
+        out.append(0x0A)
+        _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }
+
+        XCTAssertNotNil(waitForPending(store: store, timeout: 3), "request never became pending")
+
+        // Claude answered in the terminal and killed the hook.
+        close(fd)
+
+        let deadline = Date().addingTimeInterval(3)
+        while !store.pendingApprovals.isEmpty, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(store.pendingApprovals.isEmpty, "stale card must be dismissed on hook EOF")
+    }
 
     private func pollForPending(store: UsageStore, then action: @escaping () -> Void) {
         func tick() {
@@ -127,6 +246,15 @@ final class ApprovalServerTests: XCTestCase {
             usleep(20_000)
         }
         return FileManager.default.fileExists(atPath: path)
+    }
+
+    private func waitForPending(store: UsageStore, timeout: TimeInterval) -> ApprovalRequest? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let pending = store.pendingApprovals.first { return pending }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return store.pendingApprovals.first
     }
 
     static func roundTrip(socketPath: String, request: String) -> String? {

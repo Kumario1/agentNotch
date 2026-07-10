@@ -24,7 +24,7 @@ final class ApprovalServer {
                                              qos: .userInitiated, attributes: .concurrent)
     private var source: DispatchSourceRead?
     private var serverFD: Int32 = -1
-    private var waiters: [String: (ApprovalDecision, String?) -> Void] = [:]
+    private var waiters: [String: (ApprovalDecision, String?, [String: String]?) -> Void] = [:]
     private var alwaysAllow: Set<String> = []
 
     init(store: UsageStore,
@@ -45,7 +45,7 @@ final class ApprovalServer {
     }
 
     // Called on the main thread from the notch UI (button / key monitor).
-    func decide(_ id: String, decision: ApprovalDecision, reason: String? = nil) {
+    func decide(_ id: String, decision: ApprovalDecision, reason: String? = nil, answers: [String: String]? = nil) {
         let pending = store.pendingApprovals.first(where: { $0.id == id })
         let alwaysKey = decision == .always ? pending?.alwaysKey : nil
         // Cursor ignores hook `permission: allow` unless the command is already on its
@@ -65,7 +65,7 @@ final class ApprovalServer {
                 self.saveAlwaysAllow()
             }
             let effective: ApprovalDecision = decision == .always ? .allow : decision
-            self.waiters.removeValue(forKey: id)?(effective, reason)
+            self.waiters.removeValue(forKey: id)?(effective, reason, answers)
         }
     }
 
@@ -112,6 +112,10 @@ final class ApprovalServer {
 
     private func handle(clientFD: Int32) {
         defer { close(clientFD) }
+        // The peer (hook) can die while we block for a decision; without this a late
+        // writeDecision to the closed socket raises SIGPIPE and kills the whole app.
+        var one: Int32 = 1
+        setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         var buf = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -137,7 +141,7 @@ final class ApprovalServer {
             return
         }
 
-        let autoAllow = stateQueue.sync { alwaysAllow.contains(request.alwaysKey) }
+        let autoAllow = request.questions.isEmpty && stateQueue.sync { alwaysAllow.contains(request.alwaysKey) }
         if autoAllow {
             if request.product == .cursor {
                 CursorPermissions.syncAllow(command: request.summary, permissionsPath: cursorPermissionsPath)
@@ -147,43 +151,75 @@ final class ApprovalServer {
             return
         }
 
-        let (decision, reason) = blockForDecision(request)
+        // If the user answers the permission prompt in the terminal instead, Claude kills
+        // the hook and the socket EOFs — that's our only signal to drop the stale card
+        // instead of leaving the notch asking forever (issue #3).
+        let hangup = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: stateQueue)
+        hangup.setEventHandler { [weak self] in
+            var byte: UInt8 = 0
+            guard recv(clientFD, &byte, 1, MSG_PEEK) <= 0 else { return }
+            hangup.cancel()
+            self?.dismissAbandoned(request.id)
+        }
+        hangup.resume()
+        defer { hangup.cancel() }
+
+        let (decision, reason, answers) = blockForDecision(request)
         // The allow path just synced the command into ~/.cursor/permissions.json (in
         // decide()). Cursor re-reads that file on change, but asynchronously — give the
         // watcher a beat so the pending command auto-runs instead of re-prompting in Cursor.
         if request.product == .cursor, decision == .allow {
             Thread.sleep(forTimeInterval: 0.4)
         }
-        writeDecision(clientFD, request: request, decision: decision, reason: reason)
+        writeDecision(clientFD, request: request, decision: decision, reason: reason, answers: answers)
     }
 
-    private func blockForDecision(_ request: ApprovalRequest) -> (ApprovalDecision, String?) {
+    // Hook died before we decided (terminal answered / session ended): remove the card
+    // and unblock the handler. The deny it writes lands on a dead socket, harmlessly.
+    private func dismissAbandoned(_ id: String) {
+        DispatchQueue.main.async { [store] in
+            store.pendingApprovals.removeAll { $0.id == id }
+        }
+        // Already on stateQueue (hangup source's queue), so touch waiters directly.
+        waiters.removeValue(forKey: id)?(.deny, nil, nil)
+    }
+
+    private func blockForDecision(_ request: ApprovalRequest) -> (ApprovalDecision, String?, [String: String]?) {
         let sem = DispatchSemaphore(value: 0)
         var result = ApprovalDecision.allow
         var resultReason: String? = nil
+        var resultAnswers: [String: String]? = nil
         DispatchQueue.main.async { [store] in
             if !store.pendingApprovals.contains(where: { $0.id == request.id }) {
                 store.pendingApprovals.append(request)
             }
         }
         stateQueue.async { [weak self] in
-            self?.waiters[request.id] = { decision, reason in
+            self?.waiters[request.id] = { decision, reason, answers in
                 result = decision
                 resultReason = reason
+                resultAnswers = answers
                 sem.signal()
             }
         }
         sem.wait()
         stateQueue.async { [weak self] in self?.waiters.removeValue(forKey: request.id) }
-        return (result, resultReason)
+        return (result, resultReason, resultAnswers)
     }
 
     // The hook owns the harness-specific output shapes; we hand it just the verdict
     // and, for a deny-with-feedback, the reason the user typed (fed back to the model).
-    private func writeDecision(_ fd: Int32, request: ApprovalRequest, decision: ApprovalDecision, reason: String? = nil) {
+    private func writeDecision(
+        _ fd: Int32,
+        request: ApprovalRequest,
+        decision: ApprovalDecision,
+        reason: String? = nil,
+        answers: [String: String]? = nil
+    ) {
         let effective: ApprovalDecision = decision == .always ? .allow : decision
         var obj: [String: Any] = ["decision": effective.rawValue]
         if let reason, !reason.isEmpty { obj["reason"] = reason }
+        if let answers, !answers.isEmpty { obj["answers"] = answers }
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         var out = data
         out.append(0x0A)
@@ -194,6 +230,7 @@ final class ApprovalServer {
         let productRaw = obj["product"] as? String ?? "claude"
         let product = Product(rawValue: productRaw) ?? .claude
         let tool = obj["toolName"] as? String ?? obj["tool_name"] as? String ?? "tool"
+        let questions = parseQuestions(tool: tool, obj: obj)
         let summary = obj["summary"] as? String ?? obj["command"] as? String ?? tool
         let cwd = obj["cwd"] as? String
         let sessionTitle: String
@@ -213,7 +250,32 @@ final class ApprovalServer {
             summary: summary,
             cwd: cwd,
             receivedAt: Date(),
-            alwaysKey: alwaysKey)
+            alwaysKey: alwaysKey,
+            questions: questions)
+    }
+
+    private func parseQuestions(tool: String, obj: [String: Any]) -> [ApprovalQuestion] {
+        guard tool == "AskUserQuestion",
+              let input = obj["tool_input"] as? [String: Any],
+              let rawQuestions = input["questions"] as? [[String: Any]] else { return [] }
+
+        return rawQuestions.map { raw in
+            let header = raw["header"] as? String ?? ""
+            let question = raw["question"] as? String ?? (header.isEmpty ? "Question" : header)
+            let multiSelect = raw["multiSelect"] as? Bool ?? false
+            let rawOptions = raw["options"] as? [[String: Any]] ?? []
+            let options = rawOptions.compactMap { rawOption -> ApprovalOption? in
+                guard let label = rawOption["label"] as? String, !label.isEmpty else { return nil }
+                return ApprovalOption(
+                    label: label,
+                    description: rawOption["description"] as? String ?? "")
+            }
+            return ApprovalQuestion(
+                question: question,
+                header: header,
+                multiSelect: multiSelect,
+                options: options)
+        }
     }
 
     // MARK: - Always allow persistence
