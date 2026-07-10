@@ -31,7 +31,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings = SettingsController(config: config) { [weak self] updated in
             self?.config = updated
         }
-        controller = NotchController(settings: settings, claudeDirs: config.claudeDirs)
+        controller = NotchController(settings: settings,
+                                     claudeDirs: config.claudeDirs,
+                                     placement: WidgetPlacement.load())
         controller.start()
         HookInstaller.sync(config: config)
         // Re-register after reinstall/move; ad-hoc rebuilds invalidate prior BTM entries.

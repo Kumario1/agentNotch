@@ -4,15 +4,29 @@ import SwiftUI
 // Sizes computed by NotchController from the physical notch.
 struct NotchMetrics: Equatable {
     var notchWidth: CGFloat
-    var collapsed: CGSize
+    var topCollapsed: CGSize
+    var sideCollapsed: CGSize
     var expanded: CGSize
     var expandedDetail: CGSize   // taller — the notch grows to reveal one session
+
+    var maximumShapeSize: CGSize {
+        CGSize(width: max(expanded.width, expandedDetail.width),
+               height: max(expanded.height, expandedDetail.height))
+    }
+
+    func shapeSize(edge: WidgetEdge, expanded: Bool, detail: Bool) -> CGSize {
+        if expanded { return detail ? expandedDetail : self.expanded }
+        return edge == .top ? topCollapsed : sideCollapsed
+    }
 }
 
 // UI-only state; separate from usage data so hover doesn't touch the store.
 import Observation
 @Observable final class NotchState {
     var expanded = false
+    var edge: WidgetEdge = .top
+    var dragging = false
+    var gripVisible = false   // pointer is near the grip zone — the handle fades in
     var selectedSessionID: String? = nil
     var selectedProduct: Product? = nil
     var selectedAccountID: String? = nil
@@ -23,6 +37,7 @@ import Observation
 // The Apple-notch silhouette: concave flares at the top outer corners (wallpaper
 // peeks over them, like the real notch meeting the bezel) + convex rounded bottom.
 struct NotchShape: Shape {
+    var edge: WidgetEdge
     var topRadius: CGFloat
     var bottomRadius: CGFloat
 
@@ -32,6 +47,23 @@ struct NotchShape: Shape {
     }
 
     func path(in r: CGRect) -> Path {
+        switch edge {
+        case .top:
+            return topPath(in: r)
+        case .left:
+            let canonical = CGRect(x: 0, y: 0, width: r.height, height: r.width)
+            return topPath(in: canonical).applying(
+                CGAffineTransform(a: 0, b: -1, c: 1, d: 0,
+                                  tx: r.minX, ty: r.minY + r.height))
+        case .right:
+            let canonical = CGRect(x: 0, y: 0, width: r.height, height: r.width)
+            return topPath(in: canonical).applying(
+                CGAffineTransform(a: 0, b: 1, c: -1, d: 0,
+                                  tx: r.minX + r.width, ty: r.minY))
+        }
+    }
+
+    private func topPath(in r: CGRect) -> Path {
         var p = Path()
         p.move(to: CGPoint(x: r.minX, y: r.minY))
         p.addQuadCurve(to: CGPoint(x: r.minX + topRadius, y: r.minY + topRadius),
@@ -77,22 +109,31 @@ private func usageColor(_ fraction: Double, _ product: Product) -> Color {
 // Masked with a stretchable notch-shape image (Apple says use maskImage, not a
 // layer mask, for behind-window blending).
 private struct BehindWindowBlur: NSViewRepresentable {
+    let edge: WidgetEdge
+    let topRadius: CGFloat
+    let bottomRadius: CGFloat
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
         v.material = .hudWindow
         v.blendingMode = .behindWindow
         v.state = .active
-        v.maskImage = notchMaskImage(topRadius: 10, bottomRadius: 28)
+        v.maskImage = notchMaskImage(edge: edge, topRadius: topRadius,
+                                     bottomRadius: bottomRadius)
         return v
     }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.maskImage = notchMaskImage(edge: edge, topRadius: topRadius,
+                                          bottomRadius: bottomRadius)
+    }
 }
 
-private func notchMaskImage(topRadius: CGFloat, bottomRadius: CGFloat) -> NSImage {
-    let size = NSSize(width: 120, height: 100)
+private func notchMaskImage(edge: WidgetEdge, topRadius: CGFloat, bottomRadius: CGFloat) -> NSImage {
+    let size = edge == .top ? NSSize(width: 120, height: 100) : NSSize(width: 100, height: 120)
     let img = NSImage(size: size, flipped: true) { rect in
         guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-        ctx.addPath(NotchShape(topRadius: topRadius, bottomRadius: bottomRadius).path(in: rect).cgPath)
+        ctx.addPath(NotchShape(edge: edge, topRadius: topRadius,
+                               bottomRadius: bottomRadius).path(in: rect).cgPath)
         ctx.setFillColor(.black)
         ctx.fillPath()
         return true
@@ -104,13 +145,17 @@ private func notchMaskImage(topRadius: CGFloat, bottomRadius: CGFloat) -> NSImag
 }
 
 // MARK: - Root: one hierarchy, spring-morphed between states.
-// The panel window is always expanded-size; only this shape animates.
+// The controller supplies enough room for the current state and this shape animates
+// between the resting and expanded layouts.
 
 struct NotchRootView: View {
     var store: UsageStore
     var ui: NotchState
     var m: NotchMetrics
     var onOpenSettings: () -> Void = {}
+    var onGripDragStarted: () -> Void = {}
+    var onGripDragChanged: () -> Void = {}
+    var onGripDragEnded: () -> Void = {}
     var onApprovalDecision: (String, ApprovalDecision, String?) -> Void = { _, _, _ in }
     var onSwitchClaudeAccount: (String) -> Void = { _ in }
 
@@ -120,51 +165,225 @@ struct NotchRootView: View {
         let exp = ui.expanded
         // A selected session grows the notch taller so the whole session is visible.
         let detail = exp && ui.selectedSessionID != nil
-        let size = exp ? (detail ? m.expandedDetail : m.expanded) : m.collapsed
-        let shouldBounce = store.currentApproval != nil && !exp
-        ZStack(alignment: .top) {
-            BehindWindowBlur()
-                .opacity(exp ? 1 : 0)
-            NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13)
-                .fill(LinearGradient(colors: [Color(red: 0.30, green: 0.15, blue: 0.11),
-                                              Color(red: 0.20, green: 0.11, blue: 0.08)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .opacity(exp ? 0.42 : 0)
-            NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13)
-                .fill(.black)
-                .opacity(exp ? 0 : 1)
-            if exp {
-                ExpandedContent(
-                    store: store,
-                    ui: ui,
-                    onOpenSettings: onOpenSettings,
-                    onApprovalDecision: onApprovalDecision,
-                    onSwitchClaudeAccount: onSwitchClaudeAccount)
-                    .transition(.scale(scale: 0.9, anchor: .top).combined(with: .opacity))
-            } else if let approval = store.currentApproval {
-                CollapsedApproval(request: approval, notchWidth: m.notchWidth)
-                    .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
-            } else {
-                CollapsedContent(store: store, notchWidth: m.notchWidth)
-                    .transition(.scale(scale: 1.15, anchor: .top).combined(with: .opacity))
+        let size = m.shapeSize(edge: ui.edge, expanded: exp, detail: detail)
+        let alignment: Alignment = switch ui.edge {
+        case .top: .top
+        case .left: .leading
+        case .right: .trailing
+        }
+        let edgeAnchor: UnitPoint = switch ui.edge {
+        case .top: .top
+        case .left: .leading
+        case .right: .trailing
+        }
+        let shouldBounce = store.currentApproval != nil && !exp && !ui.dragging
+        let topRadius: CGFloat = exp ? 10 : 6
+        let bottomRadius: CGFloat = exp ? 28 : 13
+        let shape = NotchShape(edge: ui.edge, topRadius: topRadius, bottomRadius: bottomRadius)
+
+        DockedWidgetAssembly(edge: ui.edge, shapeSize: size,
+                             gripVisible: ui.gripVisible || ui.dragging) {
+            ZStack(alignment: .top) {
+                BehindWindowBlur(edge: ui.edge, topRadius: topRadius, bottomRadius: bottomRadius)
+                    .opacity(exp ? 1 : 0)
+                shape
+                    .fill(LinearGradient(colors: [Color(red: 0.30, green: 0.15, blue: 0.11),
+                                                  Color(red: 0.20, green: 0.11, blue: 0.08)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .opacity(exp ? 0.42 : 0)
+                shape
+                    .fill(.black)
+                    .opacity(exp ? 0 : 1)
+                if exp {
+                    ExpandedContent(
+                        store: store,
+                        ui: ui,
+                        onOpenSettings: onOpenSettings,
+                        onApprovalDecision: onApprovalDecision,
+                        onSwitchClaudeAccount: onSwitchClaudeAccount)
+                        .transition(.scale(scale: 0.9, anchor: edgeAnchor).combined(with: .opacity))
+                } else if let approval = store.currentApproval {
+                    CollapsedApproval(request: approval, notchWidth: m.notchWidth, edge: ui.edge)
+                        .transition(.scale(scale: 1.08, anchor: edgeAnchor).combined(with: .opacity))
+                } else {
+                    CollapsedContent(store: store, notchWidth: m.notchWidth, edge: ui.edge)
+                        .transition(.scale(scale: 1.08, anchor: edgeAnchor).combined(with: .opacity))
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .clipShape(shape)
+        }
+        .animation(.snappy(duration: 0.28), value: exp)
+        .animation(.snappy(duration: 0.28), value: ui.edge)
+        .animation(cardSpring, value: detail)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+        .overlay {
+            GeometryReader { proxy in
+                let bounds = CGRect(origin: .zero, size: proxy.size)
+                let gripRect = WidgetGeometry.swiftUIGripRect(
+                    edge: ui.edge, shapeSize: size, bounds: bounds)
+                GripGestureSurface(
+                    onStarted: onGripDragStarted,
+                    onChanged: onGripDragChanged,
+                    onEnded: onGripDragEnded)
+                    .frame(width: gripRect.width, height: gripRect.height)
+                    .position(x: gripRect.midX, y: gripRect.midY)
             }
         }
-        .frame(width: size.width, height: size.height)
-        .clipShape(NotchShape(topRadius: exp ? 10 : 6, bottomRadius: exp ? 28 : 13))
-        .animation(.snappy(duration: 0.28), value: exp)
-        .animation(cardSpring, value: detail)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Attention "bounce": the notch hugs the top screen edge, so it can't move up.
-        // Instead it swells downward/outward from the pinned top edge and pulses back.
+        // Attention "bounce": the widget swells inward from whichever edge it is
+        // attached to and pulses back.
         // Uniform scale keeps the "APPROVE" text crisp (a y-only stretch distorts it).
         // Only while resting with a pending approval; opening it (or deciding) settles.
-        .scaleEffect(ui.bouncing ? 1.16 : 1.0, anchor: .top)
+        .scaleEffect(ui.bouncing ? 1.16 : 1.0, anchor: edgeAnchor)
         .animation(shouldBounce
                    ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true)
                    : .snappy(duration: 0.24),
                    value: ui.bouncing)
         .onChange(of: shouldBounce) { _, bounce in ui.bouncing = bounce }
         .onAppear { ui.bouncing = shouldBounce }
+    }
+}
+
+private struct DockedWidgetAssembly<Content: View>: View {
+    let edge: WidgetEdge
+    let shapeSize: CGSize
+    let gripVisible: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        switch edge {
+        case .top:
+            VStack(spacing: 0) {
+                content()
+                DragHandle(edge: edge, visible: gripVisible)
+                    .frame(width: WidgetGeometry.topGripHitSize.width,
+                           height: WidgetGeometry.topGripHitSize.height)
+            }
+            .frame(width: max(shapeSize.width, WidgetGeometry.topGripHitSize.width),
+                   height: shapeSize.height + WidgetGeometry.topGripHitSize.height,
+                   alignment: .top)
+        case .left:
+            HStack(spacing: 0) {
+                content()
+                DragHandle(edge: edge, visible: gripVisible)
+                    .frame(width: WidgetGeometry.sideGripHitSize.width,
+                           height: WidgetGeometry.sideGripHitSize.height)
+            }
+            .frame(width: shapeSize.width + WidgetGeometry.sideGripHitSize.width,
+                   height: max(shapeSize.height, WidgetGeometry.sideGripHitSize.height),
+                   alignment: .leading)
+        case .right:
+            HStack(spacing: 0) {
+                DragHandle(edge: edge, visible: gripVisible)
+                    .frame(width: WidgetGeometry.sideGripHitSize.width,
+                           height: WidgetGeometry.sideGripHitSize.height)
+                content()
+            }
+            .frame(width: shapeSize.width + WidgetGeometry.sideGripHitSize.width,
+                   height: max(shapeSize.height, WidgetGeometry.sideGripHitSize.height),
+                   alignment: .trailing)
+        }
+    }
+}
+
+private struct DragHandle: View {
+    let edge: WidgetEdge
+    let visible: Bool
+
+    private var pill: some View {
+        ZStack {
+            Capsule()
+                .fill(.black.opacity(0.92))
+                .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+            VStack(spacing: 1.5) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Capsule().fill(.white.opacity(0.48)).frame(width: 12, height: 1)
+                }
+            }
+        }
+        .frame(width: 36, height: 14)
+    }
+
+    // Anchor the pop-in at the shape's edge so the pill grows out of the widget.
+    private var anchor: UnitPoint {
+        switch edge {
+        case .top: .top
+        case .left: .leading
+        case .right: .trailing
+        }
+    }
+
+    var body: some View {
+        Group {
+            switch edge {
+            case .top:
+                pill
+                    .offset(y: -1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            case .left:
+                pill
+                    .rotationEffect(.degrees(90))
+                    .frame(width: 14, height: 36)
+                    .offset(x: -1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            case .right:
+                pill
+                    .rotationEffect(.degrees(90))
+                    .frame(width: 14, height: 36)
+                    .offset(x: 1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+            }
+        }
+        .opacity(visible ? 1 : 0)
+        .scaleEffect(visible ? 1 : 0.6, anchor: anchor)
+        .animation(.snappy(duration: 0.18), value: visible)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct GripGestureSurface: View {
+    let onStarted: () -> Void
+    let onChanged: () -> Void
+    let onEnded: () -> Void
+
+    @State private var dragging = false
+    @State private var hovering = false
+
+    var body: some View {
+        // Not Color.clear: the window server routes clicks on fully transparent
+        // pixels to the window underneath, so a clear surface would only be
+        // draggable on the tiny drawn pill. A near-zero alpha keeps the whole
+        // hit zone grabbable while staying invisible.
+        Color.black.opacity(0.02)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: WidgetGeometry.dragThreshold,
+                            coordinateSpace: .global)
+                    .onChanged { _ in
+                        if !dragging {
+                            dragging = true
+                            NSCursor.closedHand.set()
+                            onStarted()
+                        }
+                        onChanged()
+                    }
+                    .onEnded { _ in
+                        onEnded()
+                        dragging = false
+                        (hovering ? NSCursor.openHand : NSCursor.arrow).set()
+                    }
+            )
+            .onHover { inside in
+                hovering = inside
+                if !dragging {
+                    (inside ? NSCursor.openHand : NSCursor.arrow).set()
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Drag to move widget")
+            .accessibilityHint("Click and drag to dock the widget to another screen edge")
+            .help("Drag to move widget")
     }
 }
 
@@ -313,19 +532,34 @@ private struct RingGauge: View {
 private struct CollapsedContent: View {
     var store: UsageStore
     let notchWidth: CGFloat
+    let edge: WidgetEdge
 
     var body: some View {
         let accounts = store.topActiveAccounts(limit: 2)
-        HStack(spacing: 0) {
-            wing(accounts.first).frame(maxWidth: .infinity)
-            Color.clear.frame(width: notchWidth)
-            wing(accounts.count > 1 ? accounts[1] : nil).frame(maxWidth: .infinity)
+        switch edge {
+        case .top:
+            HStack(spacing: 0) {
+                topWing(accounts.first).frame(maxWidth: .infinity)
+                Color.clear.frame(width: notchWidth)
+                topWing(accounts.count > 1 ? accounts[1] : nil).frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .left, .right:
+            VStack(spacing: 0) {
+                sideWing(accounts.first)
+                    .frame(maxHeight: .infinity)
+                Divider().overlay(.white.opacity(0.10)).padding(.horizontal, 7)
+                sideWing(accounts.count > 1 ? accounts[1] : nil)
+                    .frame(maxHeight: .infinity)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 5)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder private func wing(_ account: AccountUsage?) -> some View {
+    @ViewBuilder private func topWing(_ account: AccountUsage?) -> some View {
         HStack(spacing: 7) {
             if let account {
                 productTile(account.product, size: 24)
@@ -350,6 +584,33 @@ private struct CollapsedContent: View {
             }
         }
     }
+
+    @ViewBuilder private func sideWing(_ account: AccountUsage?) -> some View {
+        VStack(spacing: 7) {
+            if let account {
+                productTile(account.product, size: 23)
+                if account.status == nil, !account.windows.isEmpty {
+                    HStack(spacing: 3) {
+                        ForEach(Array(account.windows.prefix(2)), id: \.name) { window in
+                            VStack(spacing: 1) {
+                                RingGauge(fraction: min(max(window.percent / 100, 0), 1),
+                                          product: account.product, size: 18)
+                                Text(verbatim: window.name)
+                                    .font(.system(size: 6, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.52))
+                            }
+                        }
+                    }
+                } else {
+                    Circle()
+                        .fill(cursorAccent.opacity(0.7))
+                        .frame(width: 8, height: 8)
+                }
+            } else {
+                Circle().fill(.white.opacity(0.08)).frame(width: 23, height: 23)
+            }
+        }
+    }
 }
 
 // MARK: - Collapsed layout: pending-approval alert (replaces the gauges while waiting)
@@ -357,37 +618,57 @@ private struct CollapsedContent: View {
 private struct CollapsedApproval: View {
     let request: ApprovalRequest
     let notchWidth: CGFloat
+    let edge: WidgetEdge
 
     var body: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                productTile(request.product, size: 22)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(verbatim: request.toolName)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(verbatim: "needs approval")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
+        switch edge {
+        case .top:
+            HStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    productTile(request.product, size: 22)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(verbatim: request.toolName)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(verbatim: "needs approval")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Color.clear.frame(width: notchWidth)
+                HStack(spacing: 5) {
+                    Text(verbatim: "APPROVE")
+                        .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                        .foregroundStyle(peach)
+                        .shadow(color: peach.opacity(0.6), radius: 5)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(peach)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Color.clear.frame(width: notchWidth)
-            HStack(spacing: 5) {
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .left, .right:
+            VStack(spacing: 10) {
+                productTile(request.product, size: 25)
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(peach)
+                    .shadow(color: peach.opacity(0.55), radius: 5)
                 Text(verbatim: "APPROVE")
-                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                    .tracking(0.6)
                     .foregroundStyle(peach)
-                    .shadow(color: peach.opacity(0.6), radius: 5)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .black))
-                    .foregroundStyle(peach)
+                Image(systemName: edge == .left ? "chevron.right" : "chevron.left")
+                    .font(.system(size: 9, weight: .black))
+                    .foregroundStyle(peach.opacity(0.9))
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -413,12 +694,10 @@ private struct ExpandedContent: View {
                     .tracking(2)
                     .foregroundStyle(store.currentApproval != nil ? peach : .white.opacity(0.58))
                 Spacer()
-                HStack(spacing: 16) {
-                    Button(action: onOpenSettings) {
-                        Image(systemName: "gearshape.fill")
-                    }
-                    .buttonStyle(.plain)
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape.fill")
                 }
+                .buttonStyle(.plain)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.38))
             }
