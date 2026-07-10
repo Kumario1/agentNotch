@@ -620,26 +620,41 @@ private struct LimitProgressRow: View {
 
     var body: some View {
         let fraction = min(max(window.percent / 100, 0), 1)
-        HStack(spacing: 12) {
-            Text(verbatim: window.name)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.56))
-                .frame(width: 34, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.13))
-                    Capsule()
-                        .fill(usageColor(fraction, product))
-                        .frame(width: max(6, geo.size.width * fraction))
+        VStack(alignment: .trailing, spacing: 3) {
+            HStack(spacing: 12) {
+                Text(verbatim: window.name)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.56))
+                    .frame(width: 34, alignment: .leading)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.13))
+                        Capsule()
+                            .fill(usageColor(fraction, product))
+                            .frame(width: max(6, geo.size.width * fraction))
+                    }
                 }
+                .frame(height: 6)
+                Text(verbatim: "\(Int(window.percent.rounded()))%")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 42, alignment: .trailing)
             }
-            .frame(height: 6)
-            Text(verbatim: "\(Int(window.percent.rounded()))%")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(width: 42, alignment: .trailing)
+            if let label = resetLabel(window.resetsAt) {
+                Text(verbatim: label)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
         }
     }
+}
+
+// "resets 6:00 PM" within 24h, "resets Jul 31" beyond; nothing once passed or unknown.
+func resetLabel(_ date: Date?) -> String? {
+    guard let date, date > Date() else { return nil }
+    let fmt = DateFormatter()
+    fmt.dateFormat = date.timeIntervalSinceNow < 86_400 ? "h:mm a" : "MMM d"
+    return "resets \(fmt.string(from: date))"
 }
 
 private struct EmptySessions: View {

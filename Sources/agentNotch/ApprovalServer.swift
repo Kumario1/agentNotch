@@ -112,6 +112,10 @@ final class ApprovalServer {
 
     private func handle(clientFD: Int32) {
         defer { close(clientFD) }
+        // The peer (hook) can die while we block for a decision; without this a late
+        // writeDecision to the closed socket raises SIGPIPE and kills the whole app.
+        var one: Int32 = 1
+        setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         var buf = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -147,6 +151,19 @@ final class ApprovalServer {
             return
         }
 
+        // If the user answers the permission prompt in the terminal instead, Claude kills
+        // the hook and the socket EOFs — that's our only signal to drop the stale card
+        // instead of leaving the notch asking forever (issue #3).
+        let hangup = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: stateQueue)
+        hangup.setEventHandler { [weak self] in
+            var byte: UInt8 = 0
+            guard recv(clientFD, &byte, 1, MSG_PEEK) <= 0 else { return }
+            hangup.cancel()
+            self?.dismissAbandoned(request.id)
+        }
+        hangup.resume()
+        defer { hangup.cancel() }
+
         let (decision, reason, answers) = blockForDecision(request)
         // The allow path just synced the command into ~/.cursor/permissions.json (in
         // decide()). Cursor re-reads that file on change, but asynchronously — give the
@@ -155,6 +172,16 @@ final class ApprovalServer {
             Thread.sleep(forTimeInterval: 0.4)
         }
         writeDecision(clientFD, request: request, decision: decision, reason: reason, answers: answers)
+    }
+
+    // Hook died before we decided (terminal answered / session ended): remove the card
+    // and unblock the handler. The deny it writes lands on a dead socket, harmlessly.
+    private func dismissAbandoned(_ id: String) {
+        DispatchQueue.main.async { [store] in
+            store.pendingApprovals.removeAll { $0.id == id }
+        }
+        // Already on stateQueue (hangup source's queue), so touch waiters directly.
+        waiters.removeValue(forKey: id)?(.deny, nil, nil)
     }
 
     private func blockForDecision(_ request: ApprovalRequest) -> (ApprovalDecision, String?, [String: String]?) {

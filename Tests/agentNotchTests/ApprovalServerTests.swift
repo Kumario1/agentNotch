@@ -186,6 +186,51 @@ final class ApprovalServerTests: XCTestCase {
 
     // MARK: - Helpers
 
+    // Regression (issue #3): answering the prompt in the terminal kills the hook process.
+    // The socket EOF must dismiss the stale notch card instead of asking forever.
+    func testHookDisconnectDismissesPendingApproval() throws {
+        let short = String(UUID().uuidString.prefix(8))
+        let socketPath = "/tmp/an-\(short).sock"
+        let allowPath = "/tmp/an-\(short).json"
+        defer { unlink(socketPath); unlink(allowPath) }
+
+        let store = UsageStore()
+        let server = ApprovalServer(store: store, socketPath: socketPath, alwaysAllowPath: allowPath)
+        server.start()
+        XCTAssertTrue(waitForFile(socketPath, timeout: 3), "server socket never bound")
+
+        // Connect like the hook, send the request, but never read a response.
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        socketPath.withCString { cstr in
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                let dst = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
+                strncpy(dst, cstr, 104)
+            }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, len) }
+        }
+        XCTAssertEqual(connected, 0)
+        var out = Data(#"{"id":"gone-\#(short)","product":"claude","toolName":"Bash","summary":"ls"}"#.utf8)
+        out.append(0x0A)
+        _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }
+
+        XCTAssertNotNil(waitForPending(store: store, timeout: 3), "request never became pending")
+
+        // Claude answered in the terminal and killed the hook.
+        close(fd)
+
+        let deadline = Date().addingTimeInterval(3)
+        while !store.pendingApprovals.isEmpty, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(store.pendingApprovals.isEmpty, "stale card must be dismissed on hook EOF")
+    }
+
     private func pollForPending(store: UsageStore, then action: @escaping () -> Void) {
         func tick() {
             if store.pendingApprovals.first != nil { action(); return }
