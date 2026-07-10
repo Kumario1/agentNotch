@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import agentNotch
 
 final class LimitsTests: XCTestCase {
@@ -40,6 +41,152 @@ final class LimitsTests: XCTestCase {
         c.launchAtLogin = false
         c.save(to: path)
         XCTAssertFalse(AppConfig.parse(FileManager.default.contents(atPath: path)).launchAtLogin)
+    }
+
+    func testWidgetPlacementRoundTripAndClamping() {
+        let suiteName = "agentnotch-placement-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        WidgetPlacement(edge: .right, position: 2).save(to: defaults)
+        XCTAssertEqual(WidgetPlacement.load(from: defaults), WidgetPlacement(edge: .right, position: 1))
+
+        defaults.set("unknown", forKey: "widget.edge")
+        defaults.set(-1, forKey: "widget.position")
+        XCTAssertEqual(WidgetPlacement.load(from: defaults), WidgetPlacement(edge: .top, position: 0))
+    }
+
+    func testWidgetGeometryUsesContentFitSideRailAndGripEnvelope() {
+        XCTAssertEqual(WidgetGeometry.sideCollapsedSize, CGSize(width: 56, height: 220))
+        XCTAssertEqual(
+            WidgetGeometry.panelSize(maximumShapeSize: CGSize(width: 540, height: 720)),
+            CGSize(width: 564, height: 744))
+    }
+
+    func testWidgetGeometryPanelRectAttachesAndClampsToEveryEdge() {
+        let screen = CGRect(x: 100, y: 50, width: 1_440, height: 900)
+        let size = CGSize(width: 564, height: 744)
+
+        let top = WidgetGeometry.panelRect(edge: .top, position: 0.5,
+                                           size: size, screenFrame: screen)
+        XCTAssertEqual(top.midX, screen.midX)
+        XCTAssertEqual(top.maxY, screen.maxY)
+
+        let left = WidgetGeometry.panelRect(edge: .left, position: -1,
+                                            size: size, screenFrame: screen)
+        XCTAssertEqual(left.minX, screen.minX)
+        XCTAssertEqual(left.minY, screen.minY)
+
+        let right = WidgetGeometry.panelRect(edge: .right, position: 2,
+                                             size: size, screenFrame: screen)
+        XCTAssertEqual(right.maxX, screen.maxX)
+        XCTAssertEqual(right.maxY, screen.maxY)
+    }
+
+    func testWidgetGeometryPlacesGripBeyondEachFreeEdge() {
+        let bounds = CGRect(x: 0, y: 0, width: 564, height: 744)
+
+        let topShape = WidgetGeometry.activeRect(edge: .top,
+                                                 shapeSize: CGSize(width: 460, height: 42),
+                                                 bounds: bounds)
+        let topGrip = WidgetGeometry.gripRect(edge: .top, shapeRect: topShape)
+        XCTAssertEqual(topGrip.maxY, topShape.minY)
+        XCTAssertEqual(topGrip.midX, topShape.midX)
+        XCTAssertTrue(bounds.contains(topGrip))
+
+        let leftShape = WidgetGeometry.activeRect(edge: .left,
+                                                  shapeSize: WidgetGeometry.sideCollapsedSize,
+                                                  bounds: bounds)
+        let leftGrip = WidgetGeometry.gripRect(edge: .left, shapeRect: leftShape)
+        XCTAssertEqual(leftGrip.minX, leftShape.maxX)
+        XCTAssertEqual(leftGrip.midY, leftShape.midY)
+        XCTAssertTrue(bounds.contains(leftGrip))
+
+        let rightShape = WidgetGeometry.activeRect(edge: .right,
+                                                   shapeSize: WidgetGeometry.sideCollapsedSize,
+                                                   bounds: bounds)
+        let rightGrip = WidgetGeometry.gripRect(edge: .right, shapeRect: rightShape)
+        XCTAssertEqual(rightGrip.maxX, rightShape.minX)
+        XCTAssertEqual(rightGrip.midY, rightShape.midY)
+        XCTAssertTrue(bounds.contains(rightGrip))
+    }
+
+    func testWidgetGeometryDockPreviewThresholdAndHysteresis() {
+        let screen = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+
+        XCTAssertEqual(WidgetGeometry.dockingPreview(
+            for: CGPoint(x: 720, y: 820), in: screen, currentEdge: .left), .top)
+        XCTAssertEqual(WidgetGeometry.dockingPreview(
+            for: CGPoint(x: 80, y: 450), in: screen, currentEdge: .top), .left)
+        XCTAssertNil(WidgetGeometry.dockingPreview(
+            for: CGPoint(x: 720, y: 450), in: screen, currentEdge: .top))
+
+        // The left edge is only eight points closer, so keep the top preview.
+        XCTAssertEqual(WidgetGeometry.dockingPreview(
+            for: CGPoint(x: 8, y: 884), in: screen, currentEdge: .top), .top)
+        // Once it is more than 24 points closer, switch to the left preview.
+        XCTAssertEqual(WidgetGeometry.dockingPreview(
+            for: CGPoint(x: 8, y: 840), in: screen, currentEdge: .top), .left)
+    }
+
+    func testWidgetGeometryNormalizesDropPosition() {
+        let screen = CGRect(x: 100, y: 50, width: 1_000, height: 800)
+        XCTAssertEqual(WidgetGeometry.normalizedPosition(
+            for: CGPoint(x: 350, y: 700), edge: .top, screenFrame: screen), 0.25)
+        XCTAssertEqual(WidgetGeometry.normalizedPosition(
+            for: CGPoint(x: 350, y: 250), edge: .left, screenFrame: screen), 0.25)
+        XCTAssertEqual(WidgetGeometry.normalizedPosition(
+            for: CGPoint(x: -100, y: 2_000), edge: .right, screenFrame: screen), 1)
+    }
+
+    @MainActor
+    func testWidgetCompactLayoutsRenderForEveryEdge() {
+        for edge in [WidgetEdge.top, .left, .right] {
+            let store = UsageStore()
+            store.accounts = [
+                AccountUsage(id: "claude:test", product: .claude, label: "claude",
+                             windows: [LimitWindow(name: "5H", percent: 72, resetsAt: nil),
+                                       LimitWindow(name: "7D", percent: 41, resetsAt: nil)]),
+                AccountUsage(id: "cursor:test", product: .cursor, label: "cursor",
+                             windows: [LimitWindow(name: "API", percent: 65, resetsAt: nil),
+                                       LimitWindow(name: "AUTO", percent: 88, resetsAt: nil)]),
+            ]
+            let state = NotchState()
+            state.edge = edge
+            let metrics = NotchMetrics(notchWidth: 200,
+                                       topCollapsed: CGSize(width: 460, height: 42),
+                                       sideCollapsed: WidgetGeometry.sideCollapsedSize,
+                                       expanded: CGSize(width: 540, height: 380),
+                                       expandedDetail: CGSize(width: 540, height: 720))
+            let panelSize = WidgetGeometry.panelSize(maximumShapeSize: metrics.maximumShapeSize)
+            let renderer = ImageRenderer(content:
+                ZStack {
+                    Color(red: 0.05, green: 0.28, blue: 0.72)
+                    NotchRootView(store: store, ui: state, m: metrics)
+                }
+                .frame(width: panelSize.width, height: panelSize.height))
+            renderer.scale = 2
+            XCTAssertNotNil(renderer.nsImage, "Could not render \(edge.rawValue) compact widget")
+        }
+    }
+
+    func testWidgetGripUsesFivePointDragThreshold() {
+        XCTAssertEqual(WidgetGeometry.dragThreshold, 5)
+    }
+
+    func testSwiftUIGripGeometryMatchesTopDownPanelCoordinates() {
+        let bounds = CGRect(x: 0, y: 0, width: 564, height: 744)
+        let top = WidgetGeometry.swiftUIGripRect(
+            edge: .top, shapeSize: CGSize(width: 460, height: 42), bounds: bounds)
+        XCTAssertEqual(top, CGRect(x: 258, y: 42, width: 48, height: 24))
+
+        let left = WidgetGeometry.swiftUIGripRect(
+            edge: .left, shapeSize: WidgetGeometry.sideCollapsedSize, bounds: bounds)
+        XCTAssertEqual(left, CGRect(x: 56, y: 348, width: 24, height: 48))
+
+        let right = WidgetGeometry.swiftUIGripRect(
+            edge: .right, shapeSize: WidgetGeometry.sideCollapsedSize, bounds: bounds)
+        XCTAssertEqual(right, CGRect(x: 484, y: 348, width: 24, height: 48))
     }
 
     func testLaunchAtLoginInstallHintForDMGAndBareBinary() {
